@@ -27,6 +27,21 @@ pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> AxResult<R>) -
     }
 }
 
+/// Like [`with_fs`], but retries the operation once after attempting a lazy
+/// mount if the initial call fails with `NotFound` and the `path` matches a
+/// registered lazy-mount prefix.
+pub fn with_fs_lazy<R>(
+    dirfd: c_int,
+    path: &str,
+    f: impl Fn(&mut FsContext) -> AxResult<R>,
+) -> AxResult<R> {
+    let result = with_fs(dirfd, &f);
+    match result {
+        Err(AxError::NotFound) if crate::vfs::try_lazy_mount(path) => with_fs(dirfd, &f),
+        other => other,
+    }
+}
+
 pub enum ResolveAtResult {
     File(Location),
     Other(Arc<dyn FileLike>),
@@ -64,13 +79,13 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> AxResult<Reso
                 ResolveAtResult::Other(file_like)
             })
         }
-        Some(path) => with_fs(dirfd, |fs| {
-            if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        Some(path) => with_fs_lazy(dirfd, path, |fs| {
+            let loc = if flags & AT_SYMLINK_NOFOLLOW != 0 {
                 fs.resolve_no_follow(path)
             } else {
                 fs.resolve(path)
-            }
-            .map(ResolveAtResult::File)
+            };
+            loc.map(ResolveAtResult::File)
         }),
     }
 }

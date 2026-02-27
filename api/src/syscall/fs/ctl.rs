@@ -18,7 +18,7 @@ use starry_core::task::AsThread;
 use starry_vm::{VmPtr, vm_write_slice};
 
 use crate::{
-    file::{Directory, FileLike, get_file_like, resolve_at, with_fs},
+    file::{Directory, FileLike, get_file_like, resolve_at, with_fs, with_fs_lazy},
     mm::vm_load_string,
     time::TimeValueLike,
 };
@@ -54,10 +54,17 @@ pub fn sys_chdir(path: *const c_char) -> AxResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_chdir <= path: {path}");
 
-    let mut fs = FS_CONTEXT.lock();
-    let entry = fs.resolve(path)?;
-    fs.set_current_dir(entry)?;
-    Ok(0)
+    let resolve_and_set = || {
+        let mut fs = FS_CONTEXT.lock();
+        let entry = fs.resolve(&path)?;
+        fs.set_current_dir(entry)?;
+        Ok(0)
+    };
+
+    match resolve_and_set() {
+        Err(AxError::NotFound) if crate::vfs::try_lazy_mount(&path) => resolve_and_set(),
+        other => other,
+    }
 }
 
 pub fn sys_fchdir(dirfd: i32) -> AxResult<isize> {
@@ -304,8 +311,8 @@ pub fn sys_readlinkat(
 
     debug!("sys_readlinkat <= dirfd: {dirfd}, path: {path:?}");
 
-    with_fs(dirfd, |fs| {
-        let entry = fs.resolve_no_follow(path)?;
+    with_fs_lazy(dirfd, &path, |fs| {
+        let entry = fs.resolve_no_follow(&path)?;
         let link = entry.read_link()?;
         let read = size.min(link.len());
         vm_write_slice(buf, &link.as_bytes()[..read])?;

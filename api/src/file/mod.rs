@@ -22,7 +22,7 @@ use spin::RwLock;
 use starry_core::{resources::AX_FILE_LIMIT, task::AsThread};
 
 pub use self::{
-    fs::{Directory, File, ResolveAtResult, metadata_to_kstat, resolve_at, with_fs},
+    fs::{Directory, File, ResolveAtResult, metadata_to_kstat, resolve_at, with_fs, with_fs_lazy},
     net::Socket,
     pidfd::PidFd,
     pipe::Pipe,
