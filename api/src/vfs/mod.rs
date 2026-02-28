@@ -2,9 +2,9 @@
 //!
 //! Supports on-demand (lazy) mounting of optional filesystems like procfs.
 //! The [`lazy_mount`] submodule maintains a registry of deferred mount entries.
-//! When a path resolution encounters `NotFound`, [`try_lazy_mount`] checks
-//! whether a registered lazy mount covers that path and, if so, initializes
-//! the filesystem on first access.
+//! Before each path resolution, [`try_lazy_mount`] proactively checks whether
+//! the path falls under a registered lazy-mount prefix that has not yet been
+//! mounted and, if so, initializes the filesystem on first access.
 
 pub mod dev;
 mod proc;
@@ -121,8 +121,9 @@ pub mod lazy_mount {
 /// Attempt to lazily mount a filesystem if the given `path` falls under a
 /// registered lazy-mount prefix.
 ///
-/// Returns `true` if a filesystem was mounted (caller should retry the
-/// failed resolution), `false` otherwise.
+/// Called proactively **before** path resolution.  Returns `true` if a
+/// filesystem was mounted, `false` otherwise.  Idempotent: once a mount
+/// point transitions to `Initialized`, subsequent calls are no-ops.
 pub fn try_lazy_mount(path: &str) -> bool {
     if let Some((mount_point, fs)) = lazy_mount::take_pending_for(path) {
         let fsc = FS_CONTEXT.lock();

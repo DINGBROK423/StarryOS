@@ -157,17 +157,13 @@ pub fn sys_statfs(path: *const c_char, buf: *mut statfs) -> AxResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_statfs <= path: {path:?}");
 
-    let resolve = || {
-        FS_CONTEXT
-            .lock()
-            .resolve(&path)
-            .map(|loc| loc.mountpoint().root_location())
-    };
+    // Proactively trigger lazy mount before resolving.
+    crate::vfs::try_lazy_mount(&path);
 
-    let loc = match resolve() {
-        Err(AxError::NotFound) if crate::vfs::try_lazy_mount(&path) => resolve()?,
-        other => other?,
-    };
+    let loc = FS_CONTEXT
+        .lock()
+        .resolve(&path)
+        .map(|loc| loc.mountpoint().root_location())?;
     buf.vm_write(statfs(&loc)?)?;
     Ok(0)
 }

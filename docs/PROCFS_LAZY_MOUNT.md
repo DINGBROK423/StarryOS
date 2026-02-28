@@ -21,14 +21,18 @@ main() → init() → mount_all()
   ├── mount devfs   at /dev       ← 立即
   ├── mount tmpfs   at /dev/shm   ← 立即
   ├── mount tmpfs   at /tmp       ← 立即
-  ├── register("/proc", procfs)   ← 仅注册工厂函数，不分配任何资源
+  ├── register("/proc", procfs)   ← 仅注册函数，不分配任何资源
   └── mount tmpfs   at /sys       ← 立即
 
   ... 后续某用户程序 open("/proc/self/exe") ...
-  → resolve_at() 发现 /proc 不存在 → NotFound
-  → try_lazy_mount("/proc/self/exe") 匹配注册表
+  → with_fs_lazy() 在路径解析前调用 try_lazy_mount("/proc/self/exe")
+  → 匹配注册表中的 "/proc" 条目
   → 调用 procfs 工厂函数 → mount_at("/proc", procfs)
-  → 重试路径解析 → 成功
+  → 然后执行正常路径解析 → 成功
+
+  注意：采用"先挂载后解析"的主动策略，而非"解析失败后重试"，
+  原因是 /proc 目录可能已作为空目录存在于根文件系统上，
+  此时路径解析不会返回 NotFound，被动策略无法触发挂载。
 ```
 
 ## 改动文件清单
@@ -63,9 +67,9 @@ pub fn with_fs_lazy<R>(
     f: impl Fn(&mut FsContext) -> AxResult<R>,
 ) -> AxResult<R>
 ```
-- 先调用 `with_fs(dirfd, &f)` 尝试正常操作
-- 若返回 `AxError::NotFound` 且 `try_lazy_mount(path)` 成功，则重试
-- 其他错误不重试，直接返回
+- **在路径解析前**主动调用 `try_lazy_mount(path)` 触发挂载（如有待挂载条目）
+- 然后正常调用 `with_fs(dirfd, &f)` 执行实际操作
+- `try_lazy_mount` 是幂等的，已挂载的条目不会重复操作
 
 **修改 `resolve_at()` 函数**：
 - 将 `with_fs(dirfd, ...)` 调用改为 `with_fs_lazy(dirfd, path, ...)`
@@ -88,12 +92,11 @@ pub fn with_fs_lazy<R>(
 - 新增导入 `with_fs_lazy`
 - `sys_readlinkat`：将 `with_fs()` 改为 `with_fs_lazy()`
   - 覆盖场景：`readlink("/proc/self/exe")`（musl/glibc 常用）
-- `sys_chdir`：添加 `NotFound` 时的 `try_lazy_mount` 重试逻辑
+- `sys_chdir`：在 `resolve()` 前主动调用 `try_lazy_mount(&path)`
 
 ### 6. `api/src/syscall/fs/stat.rs` — sys_statfs 钩子
 
-- `sys_statfs`：对直接使用 `FS_CONTEXT.lock().resolve()` 的路径添加
-  `NotFound` → `try_lazy_mount` → 重试逻辑
+- `sys_statfs`：在 `resolve()` 前主动调用 `try_lazy_mount(&path)`
 
 ## 不受影响的路径
 

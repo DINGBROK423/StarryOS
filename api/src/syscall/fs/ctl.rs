@@ -54,17 +54,13 @@ pub fn sys_chdir(path: *const c_char) -> AxResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_chdir <= path: {path}");
 
-    let resolve_and_set = || {
-        let mut fs = FS_CONTEXT.lock();
-        let entry = fs.resolve(&path)?;
-        fs.set_current_dir(entry)?;
-        Ok(0)
-    };
+    // Proactively trigger lazy mount before resolving.
+    crate::vfs::try_lazy_mount(&path);
 
-    match resolve_and_set() {
-        Err(AxError::NotFound) if crate::vfs::try_lazy_mount(&path) => resolve_and_set(),
-        other => other,
-    }
+    let mut fs = FS_CONTEXT.lock();
+    let entry = fs.resolve(&path)?;
+    fs.set_current_dir(entry)?;
+    Ok(0)
 }
 
 pub fn sys_fchdir(dirfd: i32) -> AxResult<isize> {

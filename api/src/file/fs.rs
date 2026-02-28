@@ -27,19 +27,24 @@ pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> AxResult<R>) -
     }
 }
 
-/// Like [`with_fs`], but retries the operation once after attempting a lazy
-/// mount if the initial call fails with `NotFound` and the `path` matches a
-/// registered lazy-mount prefix.
+/// Like [`with_fs`], but proactively triggers lazy mounting before the
+/// operation if `path` falls under a registered lazy-mount prefix that has
+/// not yet been mounted.
+///
+/// This handles both cases:
+/// - The mount-point directory does not exist → would have been `NotFound`
+/// - The mount-point directory exists on disk as an empty dir → resolve
+///   succeeds but returns stale content without the mount
 pub fn with_fs_lazy<R>(
     dirfd: c_int,
     path: &str,
     f: impl Fn(&mut FsContext) -> AxResult<R>,
 ) -> AxResult<R> {
-    let result = with_fs(dirfd, &f);
-    match result {
-        Err(AxError::NotFound) if crate::vfs::try_lazy_mount(path) => with_fs(dirfd, &f),
-        other => other,
-    }
+    // Proactively mount any pending lazy filesystem that covers this path.
+    // `try_lazy_mount` is idempotent — once mounted, subsequent calls are
+    // no-ops (the registry entry moves to `Initialized`).
+    crate::vfs::try_lazy_mount(path);
+    with_fs(dirfd, &f)
 }
 
 pub enum ResolveAtResult {
