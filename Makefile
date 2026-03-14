@@ -52,7 +52,6 @@ img: build
 
 	@make kmod
 	@-sudo mkdir -p ./disk/root/modules
-	@sudo cp ./*.ko ./disk/root/modules/
 	@make -f kmod.mk copy_modules
 
 	@-sudo mkdir -p $(DISK_PATH)/musl

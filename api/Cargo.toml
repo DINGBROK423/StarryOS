@@ -85,6 +85,7 @@ lwprintf-rs = "0.3.1"
 kmod-loader.workspace = true
 kmod.workspace = true
 kapi.workspace = true
+ondemand-kmod.workspace = true
 
 [target.'cfg(not(target_arch = "loongarch64"))'.dependencies]
 unwinding = { version = "=0.2.8", default-features = false, features = [

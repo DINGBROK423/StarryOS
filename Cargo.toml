@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["api", "core", "user/musl/async_test", "modules/hello", "modules/kebpf"]
+members = ["api", "core", "ondemand-kmod", "user/musl/async_test", "modules/hello", "modules/kebpf", "modules/procfs"]
 exclude = ["arceos"]
 
 [workspace.package]
@@ -93,6 +93,7 @@ syscalls = { git = "https://github.com/jasonwhite/syscalls.git", rev = "92624de"
 kmod-loader = { git = "https://github.com/Starry-OS/rkm" }
 kapi = { git = "https://github.com/Starry-OS/rkm" }
 kmod = { git = "https://github.com/Starry-OS/rkm" }
+ondemand-kmod = { path = "./ondemand-kmod" }
 
 [package]
 name = "starry"
@@ -166,7 +167,7 @@ axfs-ng-vfs = { git = "https://github.com/Starry-OS/axfs-ng-vfs.git", rev = "d6f
 axio = { git = "https://github.com/Starry-OS/axio.git", rev = "ebb0c6b" }
 axplat = { git = "https://github.com/Starry-OS/axplat_crates.git", rev = "243fdc9" }
 axplat-x86-pc = { git = "https://github.com/Starry-OS/axplat_crates.git", rev = "243fdc9" }
-axplat-aarch64-qemu-virt = { git = "https://github.com/Starry-OS/axplat_crates.git", rev = "243fdc9" }
+# axplat-aarch64-qemu-virt: crates.io fallback (Starry-OS/arm-gic-driver repo deleted)
 axplat-riscv64-qemu-virt = { git = "https://github.com/Starry-OS/axplat_crates.git", rev = "243fdc9" }
 axplat-loongarch64-qemu-virt = { git = "https://github.com/Starry-OS/axplat_crates.git", rev = "243fdc9" }
 page_table_entry = { git = "https://github.com/Starry-OS/page_table_multiarch.git", rev = "9df46c8" }

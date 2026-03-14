@@ -157,13 +157,10 @@ pub fn sys_statfs(path: *const c_char, buf: *mut statfs) -> AxResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_statfs <= path: {path:?}");
 
-    buf.vm_write(statfs(
-        &FS_CONTEXT
-            .lock()
-            .resolve(path)?
-            .mountpoint()
-            .root_location(),
-    )?)?;
+    let loc = crate::kmod::ondemand::with_ondemand(&path, || {
+        Ok(FS_CONTEXT.lock().resolve(&path)?)
+    })?;
+    buf.vm_write(statfs(&loc.mountpoint().root_location())?)?;
     Ok(0)
 }
 

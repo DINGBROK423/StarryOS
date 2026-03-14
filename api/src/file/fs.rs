@@ -65,14 +65,17 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> AxResult<Reso
                 ResolveAtResult::Other(file_like)
             })
         }
-        Some(path) => with_fs(dirfd, |fs| {
-            if flags & AT_SYMLINK_NOFOLLOW != 0 {
-                fs.resolve_no_follow(path)
-            } else {
-                fs.resolve(path)
-            }
-            .map(ResolveAtResult::File)
-        }),
+        Some(path) => {
+            let do_resolve = |fs: &mut FsContext| {
+                if flags & AT_SYMLINK_NOFOLLOW != 0 {
+                    fs.resolve_no_follow(path)
+                } else {
+                    fs.resolve(path)
+                }
+                .map(ResolveAtResult::File)
+            };
+            crate::kmod::ondemand::with_ondemand(path, || with_fs(dirfd, &do_resolve))
+        }
     }
 }
 

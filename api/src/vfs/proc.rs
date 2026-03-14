@@ -88,8 +88,11 @@ const DUMMY_MEMINFO: &str = indoc! {"
 
 pub static KALLSYMS: LazyInit<KallsymsMapped<'static>> = LazyInit::new();
 
-pub fn new_procfs(kallsyms: KallsymsMapped<'static>) -> Filesystem {
+pub fn init_kallsyms(kallsyms: KallsymsMapped<'static>) {
     KALLSYMS.init_once(kallsyms);
+}
+
+pub fn new_procfs() -> Filesystem {
     SimpleFs::new_with("proc".into(), 0x9fa0, builder)
 }
 

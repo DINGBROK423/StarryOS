@@ -68,6 +68,7 @@ pub fn init() {
     info!("Initialize /proc/interrupts...");
     axtask::register_timer_callback(|_| {
         time::inc_irq_cnt();
+        kmod::ondemand::tick_ondemand();
     });
 
     // #[cfg(not(target_arch = "loongarch64"))]

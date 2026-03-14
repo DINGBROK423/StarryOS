@@ -54,9 +54,10 @@ pub fn sys_chdir(path: *const c_char) -> AxResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_chdir <= path: {path}");
 
-    let mut fs = FS_CONTEXT.lock();
-    let entry = fs.resolve(path)?;
-    fs.set_current_dir(entry)?;
+    let entry = crate::kmod::ondemand::with_ondemand(&path, || {
+        Ok(FS_CONTEXT.lock().resolve(&path)?)
+    })?;
+    FS_CONTEXT.lock().set_current_dir(entry)?;
     Ok(0)
 }
 
@@ -77,8 +78,10 @@ pub fn sys_chroot(path: *const c_char) -> AxResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_chroot <= path: {path}");
 
+    let loc = crate::kmod::ondemand::with_ondemand(&path, || {
+        Ok(FS_CONTEXT.lock().resolve(&path)?)
+    })?;
     let mut fs = FS_CONTEXT.lock();
-    let loc = fs.resolve(path)?;
     if loc.node_type() != NodeType::Directory {
         return Err(AxError::NotADirectory);
     }
@@ -337,12 +340,14 @@ pub fn sys_readlinkat(
 
     debug!("sys_readlinkat <= dirfd: {dirfd}, path: {path:?}");
 
-    with_fs(dirfd, |fs| {
-        let entry = fs.resolve_no_follow(path)?;
-        let link = entry.read_link()?;
-        let read = size.min(link.len());
-        vm_write_slice(buf, &link.as_bytes()[..read])?;
-        Ok(read as isize)
+    crate::kmod::ondemand::with_ondemand(&path, || {
+        with_fs(dirfd, |fs| {
+            let entry = fs.resolve_no_follow(&path)?;
+            let link = entry.read_link()?;
+            let read = size.min(link.len());
+            vm_write_slice(buf, &link.as_bytes()[..read])?;
+            Ok(read as isize)
+        })
     })
 }
 

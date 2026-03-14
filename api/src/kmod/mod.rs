@@ -1,4 +1,6 @@
 mod shim;
+pub mod ondemand;
+mod ondemand_builtin;
 use alloc::{
     boxed::Box,
     collections::btree_map::BTreeMap,
@@ -180,5 +182,7 @@ impl lwprintf_rs::CustomOutPut for StdOut {
 /// Initialize kmod subsystem.
 pub fn init_kmod() {
     lwprintf_rs::lwprintf_init::<StdOut>();
+    ondemand::init_ondemand();
+    ondemand_builtin::register_builtin_modules();
     ax_println!("kmod subsystem initialized");
 }
