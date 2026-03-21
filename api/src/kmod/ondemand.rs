@@ -62,8 +62,9 @@ impl ModuleLoader for KmodOnDemandLoader {
                 drop(modules);
 
                 // Two-phase unload for procfs:
-                // 1) First attempt unmounts /proc and asks monitor to retry later.
-                // 2) Next tick sees /proc already unmounted and performs delete_module.
+                // We first unmount /proc and then IMMEDIATELY delete the module, because
+                // the `KmodMem` drop now properly restores Read/Write permissions 
+                // avoiding page faults or memory corruption if axalloc reuses it.
                 if name == "procfs" {
                     let fs = FS_CONTEXT.lock();
                     if let Ok(loc) = fs.resolve("/proc") {
@@ -71,9 +72,8 @@ impl ModuleLoader for KmodOnDemandLoader {
                             match loc.unmount() {
                                 Ok(()) => {
                                     axlog::warn!(
-                                        "[ondemand] procfs unmounted, defer module free to next tick"
+                                        "[ondemand] procfs unmounted successfully"
                                     );
-                                    return Err(UnloadError::InUse);
                                 }
                                 Err(e) => {
                                     axlog::warn!(

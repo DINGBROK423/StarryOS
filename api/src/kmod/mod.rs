@@ -76,6 +76,13 @@ impl Drop for KmodMem {
             self.paddr,
             self.num_pages
         );
+        // Restore RW permissions before handing memory back to the global allocator!
+        let mut flags = MappingFlags::READ | MappingFlags::WRITE;
+        let kspace = kernel_aspace();
+        let mut guard = kspace.lock();
+        guard.protect(self.vaddr, PAGE_SIZE_4K * self.num_pages, flags).unwrap();
+        drop(guard);
+
         // Deallocate the physical frames
         dealloc_frames(self.paddr, self.num_pages);
     }
@@ -109,7 +116,13 @@ impl KernelModuleHelper for KmodHelper {
             return None;
         }
         let ksym = crate::vfs::KALLSYMS.get()?;
-        let res = ksym.lookup_name(name).map(|addr| addr as usize);
+        let res = ksym.lookup_name(name).map(|addr| addr as usize).or_else(|| {
+            if name.contains("handle_alloc_error") {
+                Some(axhal::power::system_off as usize)
+            } else {
+                None
+            }
+        });
         axlog::error!("Resolving symbol: {} => {:x?}", name, res);
         // Some(res)
         match res {

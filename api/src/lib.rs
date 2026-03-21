@@ -68,8 +68,15 @@ pub fn init() {
     info!("Initialize /proc/interrupts...");
     axtask::register_timer_callback(|_| {
         time::inc_irq_cnt();
-        kmod::ondemand::tick_ondemand();
     });
+
+    axtask::spawn(
+        || loop {
+            axtask::future::block_on(axtask::future::sleep(core::time::Duration::from_millis(500)));
+            kmod::ondemand::tick_ondemand();
+        },
+        alloc::string::String::from("ondemand-gc"),
+    );
 
     // #[cfg(not(target_arch = "loongarch64"))]
     // test_unwind();
