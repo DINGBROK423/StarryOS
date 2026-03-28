@@ -20,12 +20,45 @@ use axsync::Mutex;
 #[cfg(feature = "dev-log")]
 pub use log::bind_dev_log;
 use rand::{RngCore, SeedableRng, rngs::SmallRng};
+use spin::Once;
 use starry_core::vfs::{Device, DeviceOps, DirMaker, DirMapping, SimpleDir, SimpleFs};
 
 const RANDOM_SEED: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
 
+static DEVFS_ROOT: Once<Arc<Mutex<DirMapping>>> = Once::new();
+static DEVFS_INSTANCE: Once<Arc<SimpleFs>> = Once::new();
+
 pub(crate) fn new_devfs() -> Filesystem {
     SimpleFs::new_with("devfs".into(), 0x01021994, builder)
+}
+
+/// Register a device node under `/dev` at runtime.
+pub fn register_devfs_device(
+    name: &str,
+    node_type: NodeType,
+    device_id: DeviceId,
+    ops: Arc<dyn DeviceOps>,
+) -> VfsResult<()> {
+    let root = DEVFS_ROOT.get().ok_or(AxError::NotConnected)?;
+    let fs = DEVFS_INSTANCE.get().ok_or(AxError::NotConnected)?;
+
+    let mut root = root.lock();
+    if root.contains(name) {
+        return Err(AxError::AlreadyExists);
+    }
+
+    root.add(name, Device::new(fs.clone(), node_type, device_id, ops));
+    Ok(())
+}
+
+/// Unregister a runtime device node from `/dev`.
+pub fn unregister_devfs_device(name: &str) -> VfsResult<()> {
+    let root = DEVFS_ROOT.get().ok_or(AxError::NotConnected)?;
+    if root.lock().remove(name) {
+        Ok(())
+    } else {
+        Err(AxError::NotFound)
+    }
 }
 
 struct Null;
@@ -142,8 +175,10 @@ impl DeviceOps for CpuDmaLatency {
 }
 
 fn builder(fs: Arc<SimpleFs>) -> DirMaker {
-    let mut root = DirMapping::new();
-    root.add(
+    let root = Arc::new(Mutex::new(DirMapping::new()));
+    let mut map = root.lock();
+
+    map.add(
         "null",
         Device::new(
             fs.clone(),
@@ -152,7 +187,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(Null),
         ),
     );
-    root.add(
+    map.add(
         "zero",
         Device::new(
             fs.clone(),
@@ -161,7 +196,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(Zero),
         ),
     );
-    root.add(
+    map.add(
         "full",
         Device::new(
             fs.clone(),
@@ -170,7 +205,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(Full),
         ),
     );
-    root.add(
+    map.add(
         "random",
         Device::new(
             fs.clone(),
@@ -179,7 +214,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(Random::new()),
         ),
     );
-    root.add(
+    map.add(
         "urandom",
         Device::new(
             fs.clone(),
@@ -188,7 +223,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(Random::new()),
         ),
     );
-    root.add(
+    map.add(
         "rtc0",
         Device::new(
             fs.clone(),
@@ -198,7 +233,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         ),
     );
     if axdisplay::has_display() {
-        root.add(
+        map.add(
             "fb0",
             Device::new(
                 fs.clone(),
@@ -209,7 +244,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         );
     }
 
-    root.add(
+    map.add(
         "tty",
         Device::new(
             fs.clone(),
@@ -218,7 +253,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(tty::CurrentTty),
         ),
     );
-    root.add(
+    map.add(
         "console",
         Device::new(
             fs.clone(),
@@ -228,7 +263,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         ),
     );
 
-    root.add(
+    map.add(
         "ptmx",
         Device::new(
             fs.clone(),
@@ -237,18 +272,18 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(tty::Ptmx(fs.clone())),
         ),
     );
-    root.add(
+    map.add(
         "pts",
         SimpleDir::new_maker(fs.clone(), Arc::new(tty::PtsDir)),
     );
     #[cfg(feature = "dev-log")]
-    root.add(
+    map.add(
         "log",
         starry_core::vfs::SimpleFile::new(fs.clone(), NodeType::Socket, || Ok(b"")),
     );
 
     #[cfg(feature = "memtrack")]
-    root.add(
+    map.add(
         "memtrack",
         Device::new(
             fs.clone(),
@@ -258,7 +293,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         ),
     );
 
-    root.add(
+    map.add(
         "cpu_dma_latency",
         Device::new(
             fs.clone(),
@@ -269,7 +304,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     );
 
     // This is mounted to a tmpfs in `new_procfs`
-    root.add(
+    map.add(
         "shm",
         SimpleDir::new_maker(fs.clone(), Arc::new(DirMapping::new())),
     );
@@ -277,7 +312,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     // Loop devices
     for i in 0..16 {
         let dev_id = DeviceId::new(7, 0);
-        root.add(
+        map.add(
             format!("loop{i}"),
             Device::new(
                 fs.clone(),
@@ -290,10 +325,16 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
 
     // Input devices
     #[cfg(feature = "input")]
-    root.add(
+    map.add(
         "input",
         SimpleDir::new_maker(fs.clone(), Arc::new(event::input_devices(fs.clone()))),
     );
 
-    SimpleDir::new_maker(fs, Arc::new(root))
+    // Disable caching for /dev to allow dynamic (un)registration of devices
+    map.set_cacheable(false);
+    drop(map);
+    DEVFS_ROOT.call_once(|| root.clone());
+    DEVFS_INSTANCE.call_once(|| fs.clone());
+
+    SimpleDir::new_maker(fs, root)
 }

@@ -15,6 +15,7 @@ use axfs_ng_vfs::{
     path::{Path, PathBuf},
 };
 pub use proc::{KALLSYMS, new_procfs};
+pub use dev::{register_devfs_device, unregister_devfs_device};
 pub use starry_core::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 pub use tmp::MemoryFs;
 

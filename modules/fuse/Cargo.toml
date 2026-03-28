@@ -1,0 +1,34 @@
+[package]
+name = "fuse"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+starryfuse = { path = "../../Starryfuse" }
+axfeat.workspace = true
+starry-api.workspace = true
+axlog.workspace = true
+kmod.workspace = true
+
+[features]
+default = []
+qemu = [
+	"axfeat/driver-virtio-blk",
+	"axfeat/driver-virtio-net",
+	"axfeat/driver-virtio-socket",
+
+	"axfeat/driver-virtio-gpu",
+	"axfeat/display",
+
+	"axfeat/driver-virtio-input",
+	"axfeat/input",
+	"starry-api/input",
+
+	"axfeat/vsock",
+	"starry-api/vsock",
+
+	"axfeat/defplat",
+
+	"axfeat/fs-times",
+	"starry-api/dev-log",
+]

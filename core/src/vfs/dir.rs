@@ -4,6 +4,7 @@ use alloc::{
     collections::btree_map::BTreeMap,
     string::String,
     sync::Arc,
+    vec::Vec,
 };
 use core::any::Any;
 
@@ -100,6 +101,39 @@ impl DirMapping {
     ) {
         self.map
             .insert(name.into(), NodeOpsMuxTy::Dynamic(Arc::new(maker)));
+    }
+
+    /// Remove an entry from the directory mapping.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.map.remove(name).is_some()
+    }
+
+    /// Returns whether an entry exists in the directory mapping.
+    pub fn contains(&self, name: &str) -> bool {
+        self.map.contains_key(name)
+    }
+}
+
+impl SimpleDirOps for axsync::Mutex<DirMapping> {
+    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
+        let names: Vec<String> = self.lock().map.keys().cloned().collect();
+        Box::new(names.into_iter().map(Cow::Owned))
+    }
+
+    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
+        self.lock()
+            .map
+            .get(name)
+            .cloned()
+            .map(|ty| match ty {
+                NodeOpsMuxTy::Static(ops) => ops,
+                NodeOpsMuxTy::Dynamic(maker) => maker(),
+            })
+            .ok_or(VfsError::NotFound)
+    }
+
+    fn is_cacheable(&self) -> bool {
+        self.lock().cacheable
     }
 }
 

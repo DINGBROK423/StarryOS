@@ -1,0 +1,16 @@
+[package]
+name = "starryfuse"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axerrno.workspace = true
+axfs-ng.workspace = true
+axfs-ng-vfs.workspace = true
+axlog.workspace = true
+starry-api.workspace = true
+spin = { version = "0.9", default-features = false, features = ["spin_mutex"] }
+kmod.workspace = true
+kspin.workspace = true
+axpoll.workspace = true
+axtask.workspace = true

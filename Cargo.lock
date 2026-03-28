@@ -1308,6 +1308,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "fuse"
+version = "0.1.0"
+dependencies = [
+ "axfeat",
+ "axlog",
+ "kmod",
+ "starry-api",
+ "starryfuse",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2657,6 +2668,22 @@ dependencies = [
  "axerrno 0.1.0",
  "bytemuck",
  "extern-trait",
+]
+
+[[package]]
+name = "starryfuse"
+version = "0.1.0"
+dependencies = [
+ "axerrno 0.1.0",
+ "axfs-ng",
+ "axfs-ng-vfs",
+ "axlog",
+ "axpoll",
+ "axtask",
+ "kmod",
+ "kspin",
+ "spin 0.9.8",
+ "starry-api",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["api", "core", "ondemand-kmod", "user/musl/async_test", "modules/hello", "modules/kebpf", "modules/procfs"]
+members = ["api", "core", "ondemand-kmod", "user/musl/async_test", "modules/hello", "modules/kebpf", "modules/procfs", "Starryfuse", "modules/fuse"]
 exclude = ["arceos"]
 
 [workspace.package]
