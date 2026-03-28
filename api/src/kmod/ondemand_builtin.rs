@@ -9,8 +9,8 @@ use crate::file::FD_TABLE;
 struct ProcfsUsageChecker;
 
 #[inline]
-fn is_proc_path(path: &str) -> bool {
-    path == "/proc" || path.starts_with("/proc/")
+fn is_proc_node(loc: &axfs_ng_vfs::Location) -> bool {
+    loc.filesystem().name() == "procfs"
 }
 
 impl UsageChecker for ProcfsUsageChecker {
@@ -24,19 +24,25 @@ impl UsageChecker for ProcfsUsageChecker {
 
         for proc_data in process_data_list {
             let scope_guard = proc_data.scope.read();
-            if let Ok(cwd) = FS_CONTEXT.scope(&scope_guard).lock().current_dir().absolute_path()
-            {
-                if is_proc_path(cwd.as_str()) {
-                    return true;
-                }
+
+            // Check CWD
+            if is_proc_node(FS_CONTEXT.scope(&scope_guard).lock().current_dir()) {
+                return true;
             }
 
             let fd_table_scope = FD_TABLE.scope(&scope_guard);
             let fd_table = fd_table_scope.read();
             for fd in fd_table.ids() {
-                if let Some(file) = fd_table.get(fd) {
-                    if is_proc_path(file.inner.path().as_ref()) {
-                        return true;
+                if let Some(fd_obj) = fd_table.get(fd) {
+                    let any = fd_obj.inner.clone().into_any();
+                    if let Some(file) = any.downcast_ref::<crate::file::File>() {
+                        if is_proc_node(file.inner().location()) {
+                            return true;
+                        }
+                    } else if let Some(dir) = any.downcast_ref::<crate::file::Directory>() {
+                        if is_proc_node(dir.inner()) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -46,6 +52,12 @@ impl UsageChecker for ProcfsUsageChecker {
     }
 
     fn prepare_unload(&self) -> Result<(), ()> {
+        let fs = FS_CONTEXT.lock();
+        if let Ok(loc) = fs.resolve("/proc") {
+            if loc.is_root_of_mount() {
+                loc.unmount().map_err(|_| ())?;
+            }
+        }
         Ok(())
     }
 }
@@ -53,8 +65,8 @@ impl UsageChecker for ProcfsUsageChecker {
 struct FuseUsageChecker;
 
 #[inline]
-fn is_fuse_path(path: &str) -> bool {
-    path == "/dev/fuse" || path.starts_with("/mnt/fuse")
+fn is_fuse_node(loc: &axfs_ng_vfs::Location) -> bool {
+    loc.filesystem().name() == "fuse"
 }
 
 impl UsageChecker for FuseUsageChecker {
@@ -66,19 +78,25 @@ impl UsageChecker for FuseUsageChecker {
 
         for proc_data in process_data_list {
             let scope_guard = proc_data.scope.read();
-            if let Ok(cwd) = FS_CONTEXT.scope(&scope_guard).lock().current_dir().absolute_path()
-            {
-                if is_fuse_path(cwd.as_str()) {
-                    return true;
-                }
+
+            // Check CWD
+            if is_fuse_node(FS_CONTEXT.scope(&scope_guard).lock().current_dir()) {
+                return true;
             }
 
             let fd_table_scope = FD_TABLE.scope(&scope_guard);
             let fd_table = fd_table_scope.read();
             for fd in fd_table.ids() {
-                if let Some(file) = fd_table.get(fd) {
-                    if is_fuse_path(file.inner.path().as_ref()) {
-                        return true;
+                if let Some(fd_obj) = fd_table.get(fd) {
+                    let any = fd_obj.inner.clone().into_any();
+                    if let Some(file) = any.downcast_ref::<crate::file::File>() {
+                        if is_fuse_node(file.inner().location()) {
+                            return true;
+                        }
+                    } else if let Some(dir) = any.downcast_ref::<crate::file::Directory>() {
+                        if is_fuse_node(dir.inner()) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -88,6 +106,14 @@ impl UsageChecker for FuseUsageChecker {
     }
 
     fn prepare_unload(&self) -> Result<(), ()> {
+        // Best-effort unmount for the conventional FUSE mount point.
+        // A truly dynamic solution would require iterating all mount points.
+        let fs = FS_CONTEXT.lock();
+        if let Ok(loc) = fs.resolve("/mnt/fuse") {
+            if loc.is_root_of_mount() {
+                let _ = loc.unmount();
+            }
+        }
         Ok(())
     }
 }
