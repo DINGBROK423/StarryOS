@@ -2679,11 +2679,13 @@ dependencies = [
  "axfs-ng-vfs",
  "axlog",
  "axpoll",
+ "axsync",
  "axtask",
  "kmod",
  "kspin",
  "spin 0.9.8",
  "starry-api",
+ "starry-core",
 ]
 
 [[package]]

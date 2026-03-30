@@ -19,6 +19,32 @@ pub use dev::{register_devfs_device, unregister_devfs_device};
 pub use starry_core::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 pub use tmp::MemoryFs;
 
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::sync::Arc;
+use axerrno::{AxError, AxResult};
+use axsync::Mutex;
+use spin::Once;
+
+pub type FsCreator = Arc<dyn Fn() -> AxResult<Filesystem> + Send + Sync>;
+static FS_REGISTRY: Once<Mutex<BTreeMap<String, FsCreator>>> = Once::new();
+
+/// Register a filesystem type at runtime.
+pub fn register_filesystem(name: &str, creator: FsCreator) -> AxResult<()> {
+    FS_REGISTRY.call_once(|| Mutex::new(BTreeMap::new()));
+    let mut registry = FS_REGISTRY.get().unwrap().lock();
+    if registry.contains_key(name) {
+        return Err(AxError::AlreadyExists);
+    }
+    registry.insert(name.into(), creator);
+    Ok(())
+}
+
+/// Get a filesystem creator by its type name.
+pub fn get_filesystem_creator(name: &str) -> Option<FsCreator> {
+    FS_REGISTRY.get()?.lock().get(name).cloned()
+}
+
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
 
 fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()> {

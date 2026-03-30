@@ -9,7 +9,9 @@ axfs-ng.workspace = true
 axfs-ng-vfs.workspace = true
 axlog.workspace = true
 starry-api.workspace = true
+starry-core.workspace = true
 spin = { version = "0.9", default-features = false, features = ["spin_mutex"] }
+axsync.workspace = true
 kmod.workspace = true
 kspin.workspace = true
 axpoll.workspace = true

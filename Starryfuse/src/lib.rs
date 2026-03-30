@@ -42,6 +42,13 @@ pub fn init_fuse() -> i32 {
         }
     }
 
+    // Register as a filesystem type for mount()
+    let conn = FUSE_CONNECTION.get().cloned().unwrap();
+    let _ = starry_api::vfs::register_filesystem("fuse", Arc::new(move || {
+        let fuse_fs = vfs::FuseFs::new(conn.clone());
+        Ok(axfs_ng_vfs::Filesystem::new(fuse_fs))
+    }));
+
     0
 }
 

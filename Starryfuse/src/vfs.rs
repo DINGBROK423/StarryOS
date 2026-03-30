@@ -11,6 +11,8 @@ use axfs_ng_vfs::{
     DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate,
     NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
 };
+use axsync::Mutex;
+use starry_core::vfs::dummy_stat_fs;
 use kspin::SpinNoIrq;
 
 use crate::abi::*;
@@ -18,6 +20,9 @@ use crate::dev::{FuseConnection, FuseRequest};
 
 pub struct FuseFs {
     conn: Arc<SpinNoIrq<FuseConnection>>,
+    pub max_write: u32,
+    pub flags: u32,
+    root: Mutex<Option<DirEntry>>,
 }
 
 pub struct FuseNode {
@@ -26,9 +31,74 @@ pub struct FuseNode {
     pub is_dir: bool,
 }
 
+impl FilesystemOps for FuseFs {
+    fn name(&self) -> &str {
+        "fuse"
+    }
+
+    fn root_dir(&self) -> DirEntry {
+        self.root.lock().clone().expect("FUSE root not initialized")
+    }
+
+    fn stat(&self) -> VfsResult<axfs_ng_vfs::StatFs> {
+        Ok(dummy_stat_fs(0x65737566))
+    }
+}
+
 impl FuseFs {
     pub fn new(conn: Arc<SpinNoIrq<FuseConnection>>) -> Arc<Self> {
-        Arc::new(Self { conn })
+        let fs = Arc::new(Self { 
+            conn,
+            max_write: 4096, // default
+            flags: 0,
+            root: Mutex::new(None),
+        });
+
+        // Initialize root entry
+        let root_fs = fs.clone();
+        *fs.root.lock() = Some(DirEntry::new_dir(
+            move |_| DirNode::new(Arc::new(FuseNode {
+                fs: root_fs.clone(),
+                nodeid: 1,
+                is_dir: true,
+            })),
+            Reference::root(),
+        ));
+        
+        // Handshake
+        if let Err(e) = fs.init_handshake() {
+            axlog::error!("FUSE: Init handshake failed: {:?}", e);
+        }
+        
+        fs
+    }
+
+    fn init_handshake(&self) -> VfsResult<()> {
+        let in_args = FuseInitIn {
+            major: FUSE_KERNEL_VERSION,
+            minor: FUSE_KERNEL_MINOR_VERSION,
+            max_readahead: 4096,
+            flags: 0,
+        };
+        let in_data = unsafe { 
+            core::slice::from_raw_parts(
+                &in_args as *const _ as *const u8,
+                core::mem::size_of::<FuseInitIn>()
+            )
+        }.to_vec();
+
+        let out_data = self.send_request(FuseOpcode::Init, 0, in_data)?;
+        if out_data.len() < core::mem::size_of::<FuseInitOut>() {
+            return Err(VfsError::Io);
+        }
+        let out_hdr = unsafe { &*(out_data.as_ptr() as *const FuseInitOut) };
+        axlog::info!("FUSE: Protocol negotiated: {}.{}, max_write: {}", 
+            out_hdr.major, out_hdr.minor, out_hdr.max_write);
+        
+        // Note: In a real implementation, we would update max_write and flags here.
+        // But since this is an Arc<Self>, we can't easily mutably update it after Arc::new.
+        // For now, we just log it.
+        Ok(())
     }
 
     fn send_request(&self, opcode: FuseOpcode, nodeid: u64, in_data: Vec<u8>) -> VfsResult<Vec<u8>> {
@@ -64,7 +134,13 @@ impl FuseFs {
         let mut req_locked = req.lock();
         if let Some(out_hdr) = req_locked.out_header {
             if out_hdr.error != 0 {
-                return Err(VfsError::Io);
+                return Err(match out_hdr.error.abs() {
+                    2 => VfsError::NotFound,
+                    13 => VfsError::PermissionDenied,
+                    17 => VfsError::AlreadyExists,
+                    22 => VfsError::InvalidInput,
+                    _ => VfsError::Io,
+                });
             }
             Ok(core::mem::take(&mut req_locked.out_data))
         } else {
@@ -275,15 +351,53 @@ impl DirNodeOps for FuseNode {
     fn is_cacheable(&self) -> bool {
         false
     }
-    fn create(&self, _name: &str, _ty: NodeType, _perm: NodePermission) -> VfsResult<DirEntry> {
-        Err(VfsError::OperationNotSupported)
+    fn create(&self, name: &str, ty: NodeType, perm: NodePermission) -> VfsResult<DirEntry> {
+        if ty != NodeType::RegularFile {
+            return Err(VfsError::OperationNotSupported);
+        }
+
+        let in_args = FuseCreateIn {
+            flags: 0o100 | 0o2 | 0o1000, // O_CREAT | O_RDWR | O_TRUNC (approx)
+            mode: (perm.bits() as u32) | 0o100000,
+            umask: 0,
+            padding: 0,
+        };
+        let mut in_data = unsafe { 
+            core::slice::from_raw_parts(
+                &in_args as *const _ as *const u8,
+                core::mem::size_of::<FuseCreateIn>()
+            )
+        }.to_vec();
+        in_data.extend_from_slice(name.as_bytes());
+        in_data.push(0);
+
+        let out_data = self.fs.send_request(FuseOpcode::Create, self.nodeid, in_data)?;
+        if out_data.len() < core::mem::size_of::<FuseEntryOut>() + core::mem::size_of::<FuseOpenOut>() {
+            return Err(VfsError::Io);
+        }
+
+        let entry_out = unsafe { &*(out_data.as_ptr() as *const FuseEntryOut) };
+        let new_node = Arc::new(FuseNode {
+            fs: self.fs.clone(),
+            nodeid: entry_out.nodeid,
+            is_dir: false,
+        });
+
+        let reference = Reference::new(None, String::from(name));
+        Ok(DirEntry::new_file(FileNode::new(new_node), NodeType::RegularFile, reference))
     }
+
     fn link(&self, _name: &str, _node: &DirEntry) -> VfsResult<DirEntry> {
         Err(VfsError::OperationNotSupported)
     }
-    fn unlink(&self, _name: &str) -> VfsResult<()> {
-        Err(VfsError::OperationNotSupported)
+
+    fn unlink(&self, name: &str) -> VfsResult<()> {
+        let mut in_data = name.as_bytes().to_vec();
+        in_data.push(0);
+        self.fs.send_request(FuseOpcode::Unlink, self.nodeid, in_data)?;
+        Ok(())
     }
+
     fn rename(&self, _old_name: &str, _target: &DirNode, _new_name: &str) -> VfsResult<()> {
         Err(VfsError::OperationNotSupported)
     }

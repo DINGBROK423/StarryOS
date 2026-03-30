@@ -17,11 +17,13 @@ pub fn sys_mount(
     let fs_type = vm_load_string(fs_type)?;
     debug!("sys_mount <= source: {source:?}, target: {target:?}, fs_type: {fs_type:?}");
 
-    if fs_type != "tmpfs" {
+    let fs = if fs_type == "tmpfs" {
+        MemoryFs::new()
+    } else if let Some(creator) = crate::vfs::get_filesystem_creator(&fs_type) {
+        creator()?
+    } else {
         return Err(AxError::NoSuchDevice);
-    }
-
-    let fs = MemoryFs::new();
+    };
 
     let target = FS_CONTEXT.lock().resolve(target)?;
     target.mount(&fs)?;

@@ -36,6 +36,7 @@ pub enum FuseOpcode {
     Readdir = 28,
     Releasedir = 29,
     Fsyncdir = 30,
+    Create = 34,
     Destroy = 38,
     // Add more as needed
 }
@@ -176,6 +177,22 @@ pub struct FuseWriteOut {
 #[derive(Debug, Default, Copy, Clone)]
 pub struct FuseReadOut {
     // followed by actual data
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct FuseCreateIn {
+    pub flags: u32,
+    pub mode: u32,
+    pub umask: u32,
+    pub padding: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct FuseMkdirIn {
+    pub mode: u32,
+    pub umask: u32,
 }
 
 #[repr(C)]

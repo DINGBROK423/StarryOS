@@ -1,0 +1,10 @@
+[package]
+name = "fuse_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+
+[workspace]
+# Empty workspace to avoid inheriting from the parent workspace
