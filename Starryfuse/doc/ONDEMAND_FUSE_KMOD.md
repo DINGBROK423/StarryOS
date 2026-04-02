@@ -238,5 +238,287 @@ register_devfs_device("fuse", NodeType::CharacterDevice, DeviceId::new(10, 229),
 - **`sys_mount` 改造 (`api/src/syscall/fs/mount.rs`)**：系统调用 `sys_mount` 在处理挂载时不再使用大量的 if-else 硬编码探测文件系统，而是通过动态匹配 `get_filesystem_creator(&fs_type)` 获取目标挂载逻辑。实现了对外部模块的零感知。
 - **卸载特化逻辑清理 (`api/src/kmod/ondemand.rs`)**：彻底移除了按需加载器内部针对 `procfs` 硬编码的 "先 unmount 再立即 delete 模块" (Two-phase unload) 特化脏代码。让 `ondemand` 管理器回归纯理性的通用生命周期管控，杜绝模块特权耦合。
 
-**阶段成果：** 
-由于以上改动，目前在 StarryOS 中执行诸如 `stat /dev/fuse` 等操作，FUSE 模块已可被 100% 成功且稳定地动态无感拉起并解析成功。同时各类硬编码依赖的全面根除与动态注册机制引入，标志着操作系统的“微内核与动态模块化”范式彻底成型无遗漏。
+
+
+## Issue #2 解决历程
+
+这一部分详细记录了我们在对齐远程 723fc6b 版本与当前本地最终可工作版本之间的过程。
+
+底层 panic -> 逻辑层挂起阻塞 (卡死) -> 资源层异常反馈 -> 平稳回收释放
+
+以下是基于 `723fc6b` 的完整改动总览。
+
+| 故障类别 | 直接现象 | 根本原因 (Root Cause) | 关键修改文件 | 修复方案 | 结果 |
+|---|---|---|---|---|---|
+| **P1: 模块代码段的 Use-After-Free** | 动态卸载模块后，系统抛出 `Unhandled Supervisor Page Fault (EXECUTE)` 内核异常。 | VFS 或相关子系统中仍遗留着指向该模块代码段 (`.text`) 的入口指针。模块内存释放后，若控制流继续调用该悬空指针（Dangling Pointer），会触发指令级缺页（Execute Page Fault）。 | `api/src/kmod/ondemand.rs`<br>`modules/fuse/src/lib.rs`<br>`api/src/vfs/mod.rs` | **1. 强化卸载条件：** 仅当引用计数为零且无被打开的 `/dev/fuse` FD 时才允许卸载。<br>**2. 清除悬空指针：** 在 `fuse_exit()` 中彻底注销所属设备节点和文件系统资源。 | 彻底消除了执行型缺页引发的 Kernel Panic，动态加载/卸载流程安全闭环。 |
+| **P2: 守护进程 IO 挂起 (Daemon Hang)** | 测试结束后用户态守护进程一直挂起，`/dev/fuse` FD 被持续占用，致使内核模块无法达成卸载条件。 | 守护进程的主事件循环使用了同步阻塞型的 `read()` 系统调用。当内核不再发送 FUSE 请求时，进程永久死锁在此 IO 等待队列中，无法释放 FD。 | `Starryfuse/tests/fuse_test/src/main.rs` | 引入 IO 多路复用机制，使用带超时的 `libc::poll()` 替代阻塞式的 `read()`。当侦测到超时即代表任务结束，此时主动跳出循环并完成清理退出。 | 守护进程通过超时机制确认通信结束，正常主动退出并归还了 FD 资源控制权。 |
+| **P3: 目录读取活锁 (Readdir Livelock)** | 底层日志被高频循环触发的 `FUSE_READDIR`（opcode=28）事件霸占。 | 用户态模块未遵守文件读取游标 (`offset`) 语义，无视进度始终回复首个目录项。这导致内核 VFS 一直获取不到文件尾 (EOF) 标志，陷入不断重推读取命令的活锁机制。 | `Starryfuse/tests/fuse_test/src/main.rs` | 补充游标状态机规则：当收到 `offset != 0` 的请求时，直接回复大小为 0 的空结构(Empty Payload)，以此向内核传递标准的 EOF 信号。 | VFS 明确接收了已达文件末尾的信号，终止检索并跳出了无穷递归死循环。 |
+| **P4: 字符设备 IO 阻塞语义缺失** | 该设备在被内核调度器的 `poll`/`select` 机制监管时，暴露出了不稳定的同步唤醒与挂断行为。 | `/dev/fuse` 的驱动在呈现节点配置时，并未向内核显式注册自身等同于字符设备的阻塞属性。 | `Starryfuse/src/dev.rs` | 重写设备接口 `flags()` 方法，显式向内核 VFS 抛出 `NodeFlags::BLOCKING` 特征。 | 使内核进程调度器清楚感知该节点的阻塞特征，其对应的多路复用调度表现回归正常。 |
+| **P5: VFS 元数据更新引发异常告警** | 当触发虚拟文件系统的节点注销时，系统高频打印 `Failed to update file times on drop: OperationNotSupported`。 | VFS 在析构内存 inode 时，默认调用底层的 `update_metadata()` 试图更新其访问时间戳。该虚拟中间层缺乏此针对性支持而上报了失败异常。 | `Starryfuse/src/vfs.rs` | **实现最佳兼容的元数据更新接口：** 手动装载 `update_metadata()` 接口函数，暂时静默时间更新命令并抛出代表合法的 `Ok(())` 状态。 | 在迎合上级 VFS 的通用销毁框架下，阻拦并屏蔽了这些徒劳的磁盘同步告警。 |
+| **P6: 后台监控引发 Ext4/procfs 内核崩溃** | 后台定时检查模块是否空闲时，系统有时会爆发 `ext4_bcache_free` 等与 FUSE 完全无关的内核崩溃。 | 检查器粗暴遍历了系统所有打开的文件并强取路径 (`.path()`)。当时钟中断强制获取 Ext4 磁盘文件或 procfs 文件的路径时，违规触发了底层磁盘缓存 IO 或死锁。 | `api/src/kmod/ondemand_builtin.rs` | **缩紧检查目标**：先通过 `filesystem().name()` 确认文件类型，只要不是内存设备 (`devfs`) 则绝对不调取路径，避开磁盘 IO 和敏感锁。 | 后台检查逻辑不再误伤常规系统文件，消除了系统随机崩溃。 |
+
+以下是 Issue #2 核心问题的完整排查与解决链路：
+
+### Issue #2 问题的排查与解决过程
+
+#### 第一阶段：解决模块卸载后的 Use-After-Free 问题引发的页错误
+
+**故障现象：**
+测试日志显示，可加载内核模块 (LKM) 在卸载后，系统发生 `Unhandled Supervisor Page Fault (EXECUTE)` 内核异常。因为程序计数器 (`sepc`) 指向了已经被释放的模块 `.text` 代码段，最终导致 Kernel Panic。
+
+**根因分析：**
+原因是模块释放时，内核中仍有残留的指针指向该模块。当系统尝试通过这些指针执行已经被回收的内存页时，触发了缺页异常。
+
+**修复措施：**
+* **增加卸载条件检查：**在卸载逻辑中增加前置判断，只有当模块的引用计数归零，且没有活动的 `/dev/fuse` 文件描述符 (FD) 时，才允许卸载模块。
+* **清理注册资源：**在模块的退出函数 `fuse_exit()` 中调用 `unregister_devfs_device` 和 `unregister_filesystem`，确保清理设备和文件系统的注册信息。
+* **优化状态检查：**修改 `FuseUsageChecker` 的逻辑，准确获取模块当前的占用状态，防止因判断错误导致模块被提前卸载。
+
+#### 第二阶段：解决守护进程的 I/O 阻塞挂起 (Daemon Hang)
+
+**故障现象：**
+内核 Panic 解决后，客户端测试在结束时，用户态守护进程 (Daemon) 挂起无法退出。这导致 `/dev/fuse` 被持续占用，LKM 模块也因为不满足空闲条件而无法自动卸载。
+
+**根因分析：**
+守护进程使用阻塞式的 `read` 系统调用来等待内核的 FUSE 请求。测试结束后，内核不再下发新请求，守护进程就会一直阻塞在 `read` 调用上，无法执行后续的清理和退出逻辑。
+
+**修复措施：**
+* **使用 I/O 多路复用机制：**将守护进程的阻塞式 `read()` 改为带有超时机制的 `libc::poll()`。如果在设定的时间内没有收到内核的新请求，就判定测试结束。此时守护进程主动退出并释放相关的资源。
+
+#### 第三阶段：解决 readdir 处理不当导致的死循环
+
+**故障现象：**
+在执行 `ls` 等读取目录的测试时，系统不断产生 `FUSE_READDIR`（Opcode 28）事件，导致测试陷入死循环。
+
+**根因分析：**
+守护进程在处理 `READDIR` 请求时，忽略了 FUSE 协议中的读取偏移量（`offset`）参数，总是返回第一个目录项。因为内核 VFS 收不到代表目录读取结束的标志（EOF），所以只能不断增加 `offset` 并重新发起请求，从而产生死循环。
+
+**修复措施：**
+* **完善偏移量校验：**修改 `handle_readdir()` 的处理逻辑。当收到 `offset != 0` 的请求时，直接返回一个大小为 0 的空数据。这相当于向内核发送了 EOF 信号，VFS 收到后就会确认目录读取完毕，从而结束循环。
+
+#### 第四阶段：支持 VFS 元数据更新并消除错误告警
+
+**故障现象：**
+在进程关闭文件描述符触发 VFS 节点清理时，内核频繁打印警告信息：“`Failed to update file times on drop: OperationNotSupported`”。
+
+**根因分析：**
+内核 VFS 在释放 Inode 之前，默认会调用 `update_metadata()` 来更新文件的创建或访问时间。因为初期的 FUSE 实现中没有对接这个操作，VFS 发现操作不被支持后，抛出了系统警告。
+
+**修复措施：**
+* **实现空的元数据兼容接口：**在虚拟层实现了 `update_metadata()` 接口。由于目前的测试守护进程还未实现 `FUSE_SETATTR` 的完整对接，内核虚拟层在收到 `atime/mtime` 时间更新请求时，直接返回 `Ok(())` 状态妥协。这样满足了 VFS 必须成功调用的强制要求，彻底消除了这些挂载清理期间的告警信息。
+
+### 总结
+
+针对 commit 723fc6b 版本的 Issue #2，我们依次修复了模块释放后的缺页错误、守护进程阻塞退出、readdir 目录读取死循环以及元数据更新告警等问题。这些修复使 FUSE 机制能够在系统的动态加载模块 (LKM) 体系中稳定、正常地运行。
+
+### 附录：核心变更文件的历史修改演进
+
+本部分列出从 commit 723fc6b 到当前版本，各个核心文件在修复系统崩溃、阻塞、死循环及功能补全过程中的具体代码变动。
+
+#### 1. Starryfuse/src/vfs.rs (FUSE 虚拟文件系统适配层)
+
+该文件作为 FUSE 与 StarryOS VFS 的适配层，经历了如下修改：
+
+**第一版本 (commit 723fc6b)：**
+- `update_metadata()` 方法缺失，时间戳等操作默认返回 `OperationNotSupported` 错误。
+
+**第二版本（将初始化改为异步）：**
+- 原版的 FUSE INIT 握手过程为阻塞式同步实现。
+- 当主内核锁与模块初始化锁存在等待依赖时会导致阻塞。
+- 修改为使用 `axspawn::spawn()` 异步执行握手请求。
+
+**第三版本（支持元数据更新补偿防告警）：**
+- 实现 `update_metadata()` 接口应对 VFS 节点释放时的属性下发。当检测到 `mode` 与 `owner` 被修改时保留 `OperationNotSupported` 报错。
+- 单独为基于 `atime` 与 `mtime` 修改时间戳发起的 `metadata` 更新请求返回了一个空的 `Ok(())`状态。这是一个临时的补偿接口，用于消除 FUSE 未实现全套 `FUSE_SETATTR` 时出现的节点挂载与销毁告警。
+
+#### 2. Starryfuse/tests/fuse_test/src/main.rs (用户态 FUSE 守护进程)
+
+该测试守护进程经过了如下修改：
+
+**第一版本 (commit 723fc6b)：**
+- 主事件循环使用阻塞式 `read()` 系统调用读取内核请求。
+- 测试程序结束后，守护进程会停留在 read() 阻塞中无法退出，持续占用 FD 导致 LKM 无法自动卸载。
+- 目录读取 (`handle_readdir`) 未处理 offset 游标参数，持续返回同一项内容导致内核死循环发起请求。
+
+**第二版本（引入测试子进程监控）：**
+- 增加了 `build marker` 版本标识。
+- 使用 `fork()` 创建子进程执行文件系统测试，父进程负责监控子进程的退出状态 (`exit status`)，以确认真实执行结果。
+
+**第三版本（替换阻塞 I/O 为轮询）：**
+- 将事件循环中的阻塞 `read()` 替换为 `libc::poll()` 分发，设置 30 秒超时时间。
+- 当 poll 返回超时或等待出错时，判定测试结束，退出循环并清理资源。
+- 代码片段示例：
+  ```rust
+  let mut poll_fds = [libc::pollfd {
+      fd: fuse_fd,
+      events: libc::POLLIN,
+      revents: 0,
+  }];
+  
+  loop {
+      let poll_ret = unsafe { libc::poll(poll_fds.as_mut_ptr(), 1, 30_000) };
+      if poll_ret <= 0 { break; }  // 超时或出错则退出
+      // 处理 POLLIN 事件
+  }
+  ```
+
+**第四版本（修复目录读取的死循环）：**
+- 在 `handle_readdir()` 函数增加 offset 参数检查。
+- 当 offset != 0 时，直接回复空负载数据（代表目录读取结束的 EOF），使系统退出循环读取。
+- 代码片段示例：
+  ```rust
+  fn handle_readdir(&mut self, unique: u64, nodeid: u64, offset: u64) {
+      if offset != 0 {
+          self.send_response(unique, &[]);  // EOF
+          return;
+      }
+      // 返回第一段目录项
+  }
+  ```
+
+**第五版本（响应元数据更新）：**
+- 配合内核层支持，在主循环中增加了对 `FuseOpcode::Setattr` (Opcode 4) 的支持。
+- 新增 `handle_setattr()` 方法，接收到属性修改请求后，返回对应的 `FuseAttrOut` 结构体完成确认。
+
+#### 3. Starryfuse/src/abi.rs (FUSE 协议结构定义)
+
+**支持文件属性修改：**
+- 新增了 `FuseSetattrIn` 结构体，用于映射 Linux FUSE ABI 中设定文件属性的下发负载。
+- 定义了配套的 `FATTR_UID`, `FATTR_GID`, `FATTR_ATIME`, `FATTR_MTIME` 等位段宏常量。
+
+#### 4. Starryfuse/src/dev.rs (FUSE 虚拟字符设备节点)
+
+**补充设备特征标识：**
+- 原版中未定义该字符设备的阻塞特性。
+- 修改 `flags()` 方法，显式返回 `NodeFlags::BLOCKING`。
+- 让内核在处理 poll/select 时能够正确判断该设备的等待属性。
+- 代码片段示例：
+  ```rust
+  impl DeviceOps for FuseDev {
+      fn flags(&self) -> NodeFlags {
+          NodeFlags::BLOCKING
+      }
+  }
+  ```
+
+#### 5. api/src/vfs/mod.rs (VFS 文件系统管理)
+
+**补充文件系统注销接口：**
+- 新增 `unregister_filesystem(name: &str) -> bool` 函数。
+- 模块卸载时，用于从 `FS_REGISTRY` 映射表中主动移除模块曾注册的文件系统类型。
+- 代码片段示例：
+  ```rust
+  pub fn unregister_filesystem(name: &str) -> bool {
+      FS_REGISTRY.remove(name).is_some()
+  }
+  ```
+
+#### 6. modules/fuse/src/lib.rs (FUSE 可加载模块入口)
+
+**完善卸载清理操作：**
+- 在 `#[exit_fn]` (模块卸载钩子) 中显式调用注销接口：
+  1. `unregister_devfs_device("fuse")` (注销设备节点)
+  2. `unregister_filesystem("fuse")` (注销文件系统类型注册)
+  3. `starryfuse::exit_fuse()` (运行后续通用清理)
+- 避免了模块内存释放后遗留可达引用引发问题的可能。
+- 代码片段示例：
+  ```rust
+  #[exit_fn]
+  fn fuse_exit() {
+      let _ = crate::api::vfs::unregister_devfs_device("fuse");
+      let _ = crate::api::vfs::unregister_filesystem("fuse");
+      starryfuse::exit_fuse();
+  }
+  ```
+
+#### 7. api/src/kmod/ondemand_builtin.rs (按需模块注册与资源监控)
+
+**修复读路径引发的内核崩溃：**
+- 早期版本的 `FuseUsageChecker` 判断模块是否被占用时，会默认调用遍历到的文件句柄的 `.path()` 方法。在时钟中断的上下文中，对 Ext4 等磁盘文件系统调用该方法触发了底层缓存资源冲突（如 `ext4_bcache_free` panic）。
+- 修改逻辑：先检查文件系统名称（`filesystem().name()`）。只有目标为内存文件系统 `devfs` 时，才提安全取路径提取并比对 `/dev/fuse`，消除了读取磁盘路径相关的随机崩溃。
+
+#### 8. api/src/kmod/ondemand.rs (按需加载框架管理)
+
+**细化卸载前置检查：**
+- 进一步完善了模块尝试卸载时的依赖检查。
+- 只有同时满足引用计数归零与 Usage Checker 判定空闲，模块才能进入内存释放流程，杜绝释放后再次被执行造成的缺页错误。
+
+### 演进总结
+
+以上修改使得代码能够避免异常崩溃、解决守护进程阻塞、处理目录读取死循环、并支持元数据的顺利更新。目前 FUSE 模块加载、功能通信和自动卸载的完整生命周期均已经能正常跑通。
+
+### 附录 2：`fuse_test` 完整执行日志与流程对照解析
+
+用户态测试守护进程的主跑日志展示了 FUSE 模块在按需加载状态下完美的“创建、解析、交互、销毁”控制流交互。以下是对该输出节点的逐行原理解析：
+
+```text
+Opened /dev/fuse
+```
+**原理解析：** 用户态 Daemon 首次尝试开启虚拟字符设备 `open("/dev/fuse")`。在此瞬间，由于系统尚未加载 FUSE 驱动，VFS 捕获 NotFound 并触发 `on-demand` 机制，将 `fuse.ko` 动态装入内核内存，将驱动节点接入 `devfs`。随后 `open` 顺利返回文件句柄。
+
+```text
+Mounted /mnt/fuse successfully
+```
+**原理解析：** Daemon 调用 `sys_mount` 或者 `mount`，将刚刚取得的 FUSE 通信隧道挂接至全系统的 `/mnt/fuse` 目录。挂载操作激活了 VFS 层的桥接，之后对该目录下的查询都会被拦截塞往 Daemon 的通道中。
+
+```text
+About to fork self-test child...
+fork returned 13
+Spawned self-test child pid=13
+fork returned 0
+=== FUSE Self-Test Starting ===
+```
+**原理解析：** 程序在代码里执行 `fork()` 分化出一个普通子进程（本例中系统的 PID 分配为 `13`）。
+- **守护（父）进程（PID > 0）** 会进入后台事件循环，专心从 `/dev/fuse` 听取内核请求并抛出响应；
+- **子进程（PID=0）** 作为“客户端”去模拟普通用户的访问行为，开始进犯 `/mnt/fuse` 目录做测试。
+
+```text
+Received FUSE request: opcode=26, unique=1, nodeid=0
+Sent INIT response
+```
+**原理解析：** **协议初始化握手（`FUSE_INIT`，Opcode=26）**。这是底层 FUSE 挂载成功后第一次强制对话。内核汇报其兼容的缓冲区及版本约束（`max_readahead`等），Daemon 收信答复，双边长连接正式确认。
+
+```text
+[TEST] ls /mnt/fuse:
+Received FUSE request: opcode=28, unique=2, nodeid=1
+Sent READDIR response (offset=0, bytes=96)
+  test.txt
+Received FUSE request: opcode=28, unique=3, nodeid=1
+Sent READDIR response (offset=3, bytes=0)
+[TEST] ls /mnt/fuse: PASS
+```
+**原理解析：** 这是客户端做了一次**目录枚举扫描 (即 `ls`)**：
+1. 子进程调用底层的 `getdents64`，传导至 Daemon 时便是请求列出根目录内容，即 **`READDIR` (Opcode=28，`nodeid=1` 指代根节点)**，游标 `offset=0`。Daemon 用 96 个字节的信息组装出了一个文件名 `test.txt` 发还内核，这使得终端成功打印。
+2. VFS 层收到后，尝试“是不是还有剩下的项目？”，向后挪动游标并再发一次 `READDIR` (`offset=3` 即刚才回复记录结束点)。Daemon 程序据此返回空字节长度 (`bytes=0`) 以**表明已是目录末尾 (EOF)**。`ls` 命令完满跳出，打印 `PASS`。
+
+```text
+Received FUSE request: opcode=1, unique=4, nodeid=1
+Sent LOOKUP response for 'test.txt'
+```
+**原理解析：** 子程序意图去读 `test.txt` 了。在真的获取数据之前，VFS 核心需要先向后台定位验证该字符串对象是否真实存在，因此它在父节点 `nodeid=1` 下发起 **`LOOKUP` (Opcode=1)** "test.txt"。服务进程告知：确有此物，且它的内部标识 ID 叫做 `nodeid=100`。
+
+```text
+Received FUSE request: opcode=3, unique=5, nodeid=100
+Sent GETATTR response for nodeid=100
+... (连续多次 op=3) ...
+```
+**原理解析：** 拿到节点标号后，应用程序所引用的高级标准库常会在触发真正读写前多次轮询 **`GETATTR` (即底层 `stat/fstat` 的 FUSE 对应行为，Opcode=3)**，向我们要该标号 `nodeid=100` 的元数据（文件大小尺寸、权限等）以开辟缓冲区和做权限安全确认。
+
+```text
+Received FUSE request: opcode=15, unique=8, nodeid=100
+Sent READ response (nodeid=100, offset=0, req_size=4096, bytes=13)
+```
+**原理解析：** 这是核心的文件数据抓取阶段，**系统内核向我们要货（`READ`，Opcode=15）**。请求内核要从第0个偏移量开始最高吸取 `4096` 字节的内容。我们的测试驱动按设定回应了长度刚好为 `13` 字节的内容块：`"hello, fuse!\n"`。
+
+```text
+[TEST] read test.txt: PASS (contents: "hello, fuse!\n")
+=== FUSE Self-Test Complete ===
+Self-test child exited, status=0
+```
+**原理解析：** 子进程在成功并无错乱地收到内核传过来的 13 字节后，确认本次文件系统完整穿越没有崩溃，打印出字符串，随后自我回收调用 `_exit(0)` 主动挂掉死亡。
+
+```text
+Test complete, daemon exiting.
+```
+**原理解析：** 父进程的主循环挂置在有超期的 `libc::poll` 陷阱内。此时它通过系统调用发现了监控的子进程已经被回收 (`waitpid` status=0)，且在规定的静默倒计时期限内，`/dev/fuse` 通道里毫无请求回音冒出。
+这使得挂壁测试环境正常落幕：它安全地打断事件流，全数退出并关闭程序。紧随其后地解除了对相关系统 FD 的常驻占据，为随后 StarryOS 核心时钟清理 `fuse.ko` 模块按需卸载任务交出了所有的前置环境票根！

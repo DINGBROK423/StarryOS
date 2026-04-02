@@ -9,6 +9,9 @@ axfeat.workspace = true
 starry-api.workspace = true
 axlog.workspace = true
 kmod.workspace = true
+axerrno.workspace = true
+axfs-ng-vfs.workspace = true
+kspin.workspace = true
 
 [features]
 default = []

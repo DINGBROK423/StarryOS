@@ -66,7 +66,17 @@ struct FuseUsageChecker;
 
 #[inline]
 fn is_fuse_node(loc: &axfs_ng_vfs::Location) -> bool {
-    loc.filesystem().name() == "fuse"
+    if loc.filesystem().name() == "fuse" {
+        return true;
+    }
+    if let Ok(metadata) = loc.metadata() {
+        if metadata.node_type == axfs_ng_vfs::NodeType::CharacterDevice {
+            if metadata.rdev == axfs_ng_vfs::DeviceId::new(10, 229) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl UsageChecker for FuseUsageChecker {

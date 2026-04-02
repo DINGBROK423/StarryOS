@@ -45,6 +45,13 @@ pub fn get_filesystem_creator(name: &str) -> Option<FsCreator> {
     FS_REGISTRY.get()?.lock().get(name).cloned()
 }
 
+/// Unregister a filesystem type.
+pub fn unregister_filesystem(name: &str) {
+    if let Some(registry) = FS_REGISTRY.get() {
+        registry.lock().remove(name);
+    }
+}
+
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
 
 fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()> {

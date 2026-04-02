@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use axfs_ng_vfs::{VfsError, VfsResult};
+use axfs_ng_vfs::{NodeFlags, VfsError, VfsResult};
 use kspin::SpinNoIrq;
 use starry_api::vfs::DeviceOps;
 
@@ -105,5 +105,12 @@ impl DeviceOps for FuseDev {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn flags(&self) -> NodeFlags {
+        // Bypass the Poller path in File::read.
+        // Without this, reads go through Poller → register() is a no-op
+        // (no Pollable impl) → task sleeps forever, never woken.
+        NodeFlags::BLOCKING
     }
 }

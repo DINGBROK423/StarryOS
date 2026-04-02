@@ -53,6 +53,7 @@ pub fn init_fuse() -> i32 {
 }
 
 pub fn exit_fuse() {
+    starry_api::vfs::unregister_filesystem("fuse");
     match unregister_devfs_device("fuse") {
         Ok(()) => {
             axlog::info!("starryfuse: unregistered /dev/fuse");

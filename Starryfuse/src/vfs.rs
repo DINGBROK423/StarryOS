@@ -65,10 +65,13 @@ impl FuseFs {
             Reference::root(),
         ));
         
-        // Handshake
-        if let Err(e) = fs.init_handshake() {
-            axlog::error!("FUSE: Init handshake failed: {:?}", e);
-        }
+        // Handshake shouldn't block sys_mount, otherwise the daemon can't start its read loop!
+        let handshake_fs = fs.clone();
+        axtask::spawn(move || {
+            if let Err(e) = handshake_fs.init_handshake() {
+                axlog::error!("FUSE: Init handshake failed: {:?}", e);
+            }
+        }, String::from("fuse-init"));
         
         fs
     }
@@ -124,9 +127,20 @@ impl FuseFs {
 
         self.conn.lock().pending.push(req.clone());
 
+        let mut retries = 0u32;
         loop {
             if req.lock().completed {
                 break;
+            }
+            retries += 1;
+            if retries > 50_000 {
+                // Timed out: userspace daemon never responded.
+                // Clean up to avoid dangling references.
+                let mut conn = self.conn.lock();
+                conn.pending.retain(|r| !Arc::ptr_eq(r, &req));
+                conn.processing.remove(&unique);
+                axlog::warn!("FUSE: send_request timed out for opcode {:?}", opcode as u32);
+                return Err(VfsError::Io);
             }
             yield_now();
         }
@@ -184,12 +198,23 @@ impl NodeOps for FuseNode {
         })
     }
 
-    fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
-        Err(VfsError::OperationNotSupported)
+    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+        // The current userspace test daemon does not implement FUSE_SETATTR yet.
+        // Accept timestamp updates as best-effort no-op to avoid noisy warnings
+        // on file drop, but keep unsupported semantics for chmod/chown requests.
+        if update.mode.is_some() || update.owner.is_some() {
+            return Err(VfsError::OperationNotSupported);
+        }
+
+        if update.atime.is_some() || update.mtime.is_some() {
+            return Ok(());
+        }
+
+        Ok(())
     }
 
     fn filesystem(&self) -> &dyn FilesystemOps {
-        unimplemented!("Filesystem ops not impl")
+        self.fs.as_ref()
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {
