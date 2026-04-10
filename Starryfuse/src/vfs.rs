@@ -125,7 +125,11 @@ impl FuseFs {
             completed: false,
         }));
 
-        self.conn.lock().pending.push(req.clone());
+        {
+            let mut conn = self.conn.lock();
+            conn.pending.push(req.clone());
+            conn.poll_set.wake();
+        }
 
         let mut retries = 0u32;
         loop {

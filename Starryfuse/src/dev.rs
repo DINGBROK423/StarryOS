@@ -3,10 +3,12 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicU64, Ordering};
+use core::task::Context;
 
 use axfs_ng_vfs::{NodeFlags, VfsError, VfsResult};
 use kspin::SpinNoIrq;
 use starry_api::vfs::DeviceOps;
+use axpoll::{IoEvents, PollSet, Pollable};
 
 use crate::abi::{FuseInHeader, FuseOutHeader};
 
@@ -25,6 +27,8 @@ pub struct FuseConnection {
     pub processing: BTreeMap<u64, Arc<SpinNoIrq<FuseRequest>>>,
     // Unique ID counter
     unique_counter: AtomicU64,
+    // Poll set for async wakeups
+    pub poll_set: PollSet,
 }
 
 impl FuseConnection {
@@ -33,6 +37,7 @@ impl FuseConnection {
             pending: Vec::new(),
             processing: BTreeMap::new(),
             unique_counter: AtomicU64::new(1),
+            poll_set: PollSet::new(),
         }
     }
 
@@ -107,10 +112,36 @@ impl DeviceOps for FuseDev {
         self
     }
 
+    fn as_pollable(&self) -> Option<&dyn Pollable> {
+        Some(self)
+    }
+
     fn flags(&self) -> NodeFlags {
-        // Bypass the Poller path in File::read.
-        // Without this, reads go through Poller → register() is a no-op
-        // (no Pollable impl) → task sleeps forever, never woken.
-        NodeFlags::BLOCKING
+        // Now that we support polling, we don't need BLOCKING anymore.
+        NodeFlags::empty()
+    }
+}
+
+impl Pollable for FuseDev {
+    fn poll(&self) -> IoEvents {
+        let mut events = IoEvents::empty();
+        let conn = self.conn.lock();
+        
+        if !conn.pending.is_empty() {
+            events |= IoEvents::IN;
+        }
+        
+        // FUSE user daemon can always theoretically write a response.
+        events |= IoEvents::OUT;
+        
+        events
+    }
+
+    fn register(&self, context: &mut Context<'_>, _events: IoEvents) {
+        let conn = self.conn.lock();
+        // Since both IN and OUT share the same waker list here, 
+        // we can just register the waker to the poll_set.
+        // It will be awakened when a new request is pending.
+        conn.poll_set.register(context.waker());
     }
 }

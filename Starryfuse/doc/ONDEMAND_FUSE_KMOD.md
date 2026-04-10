@@ -522,3 +522,73 @@ Test complete, daemon exiting.
 ```
 **原理解析：** 父进程的主循环挂置在有超期的 `libc::poll` 陷阱内。此时它通过系统调用发现了监控的子进程已经被回收 (`waitpid` status=0)，且在规定的静默倒计时期限内，`/dev/fuse` 通道里毫无请求回音冒出。
 这使得挂壁测试环境正常落幕：它安全地打断事件流，全数退出并关闭程序。紧随其后地解除了对相关系统 FD 的常驻占据，为随后 StarryOS 核心时钟清理 `fuse.ko` 模块按需卸载任务交出了所有的前置环境票根！
+
+## 运行结果
+
+```bash
+[  5.774269 0:11 starry_api::kmod::ondemand:43] [ondemand] module 'fuse' loaded, handle=0x17c96ff18
+Opened /dev/fuse
+Mounted /mnt/fuse successfully
+About to fork self-test child...
+fork returned 13
+Spawned self-test child pid=13
+Received FUSE request: opcode=26, unique=1, nodeid=0
+Sent INIT response
+fork returned 0
+=== FUSE Self-Test Starting ===
+[TEST] ls /mnt/fuse:
+Received FUSE request: opcode=28, unique=2, nodeid=1
+Sent READDIR response (offset=0, bytes=96)
+  test.txt
+Received FUSE request: opcode=28, unique=3, nodeid=1
+Sent READDIR response (offset=3, bytes=0)
+[TEST] ls /mnt/fuse: PASS
+Received FUSE request: opcode=1, unique=4, nodeid=1
+Sent LOOKUP response for 'test.txt'
+Received FUSE request: opcode=3, unique=5, nodeid=100
+Sent GETATTR response for nodeid=100
+Received FUSE request: opcode=3, unique=6, nodeid=100
+Sent GETATTR response for nodeid=100
+Received FUSE request: opcode=3, unique=7, nodeid=100
+Sent GETATTR response for nodeid=100
+Received FUSE request: opcode=15, unique=8, nodeid=100
+Sent READ response (nodeid=100, offset=0, req_size=4096, bytes=13)
+Received FUSE request: opcode=3, unique=9, nodeid=100
+Sent GETATTR response for nodeid=100
+[TEST] read test.txt: PASS (contents: "hello, fuse!\n")
+=== FUSE Self-Test Complete ===
+Self-test child exited, status=0
+Test complete, daemon exiting.
+starry:~# [ 11.153416 0:6 starry_api::kmod::ondemand:55] [ondemand] unload handle=0x17c96ff18
+[ 11.154924 0:6 kmod_loader::loader:122] Calling module exit function...
+[ 11.156977 0:6 fuse:53] Fuse module exit called.
+[ 11.157721 0:6 starry_api::kmod:179] Module(fuse) exited
+[ 11.158666 0:6 starry_api::kmod:74] KmodMem::drop: Deallocating paddr=PA:0x819af000, num_pages=9
+[ 11.160802 0:6 starry_api::kmod:74] KmodMem::drop: Deallocating paddr=PA:0x819b8000, num_pages=5
+[ 11.161658 0:6 starry_api::kmod:74] KmodMem::drop: Deallocating paddr=PA:0x819bd000, num_pages=1
+[ 11.162995 0:6 starry_api::kmod:74] KmodMem::drop: Deallocating paddr=PA:0x819be000, num_pages=1
+exit
+make[1]: Leaving directory 
+```
+
+## 架构优化进阶
+
+### 字符设备的异步 I/O (Poller / Waker) 支持完成
+
+在早期的设计中，为了绕开 `read("/dev/fuse")` 导致的线程挂起死锁，我们曾在 `FuseDev` 里通过 `NodeFlags::BLOCKING` 做了直接的同步阻塞处理。目前，该部分已经被重构，彻底改为了通过 `axpoll` 与内核调度层直接对接的事件驱动模式。
+
+**重构内容与原理**：
+
+1. **引入 PollSet 作为调度中心**：
+   在 `Starryfuse/src/dev.rs` 中，我们为底层的 `FuseConnection` 增加了 `poll_set: PollSet` 以作为内核独立的等待队列。过去使用的强制阻塞标志 `NodeFlags::BLOCKING` 已被彻底清理，恢复为非阻塞标准位 `NodeFlags::empty()`，并通过覆盖 `as_pollable` 接口允许内核的多路复用器接管该设备。
+
+2. **完整接入 Pollable 事件处理**：
+   为 `FuseDev` 正式实现了 `axpoll::Pollable` 接口：当检查请求队列时，如果有待处理的数据则上报 `IoEvents::IN` 读状态；否则，就把当前调用读取的用户态任务通过 `register` 方法安全地寄存入休眠队列排队。
+
+3. **内核下达请求时的安全唤醒**：
+   在 VFS 层下发请求命令的关键路径（`Starryfuse/src/vfs.rs`）中，当新的任务指令投入队列时会立刻触发 `conn.poll_set.wake()`。这会自动拉起休眠中的处理程序立即开始工作。
+
+**实际收益**：
+
+- **解除进程读取瓶颈**：当用户态调用请求且没有任何回音时，进程不再强制卡死挂起。调度器会自动挂断并让出 CPU 资源。
+- **支持高并发与事件循环**：用户态通信程序目前已可以通过 `epoll` 或 `poll` 等事件驱动函数去同时监听多个 FUSE 挂载点及其他网络连接。这让守护系统拥有了正常、高并发的事件循环逻辑底座。
