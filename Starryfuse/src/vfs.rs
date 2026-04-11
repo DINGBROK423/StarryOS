@@ -128,6 +128,7 @@ impl FuseFs {
         {
             let mut conn = self.conn.lock();
             conn.pending.push(req.clone());
+            conn.wait_queue.wake(1, 1);
             conn.poll_set.wake();
         }
 
