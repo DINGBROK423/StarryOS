@@ -292,8 +292,11 @@ impl FileNodeOps for FuseNode {
         Err(VfsError::OperationNotSupported)
     }
     fn set_len(&self, _len: u64) -> VfsResult<()> { Ok(()) }
-    fn set_symlink(&self, _target: &str) -> VfsResult<()> {
-        Err(VfsError::OperationNotSupported)
+    fn set_symlink(&self, target: &str) -> VfsResult<()> {
+        let mut in_data = target.as_bytes().to_vec();
+        in_data.push(0);
+        self.fs.send_request(FuseOpcode::Symlink, self.nodeid, in_data)?;
+        Ok(())
     }
     fn ioctl(&self, _cmd: u32, _arg: usize) -> VfsResult<usize> {
         Err(VfsError::OperationNotSupported)
@@ -417,8 +420,42 @@ impl DirNodeOps for FuseNode {
         Ok(DirEntry::new_file(FileNode::new(new_node), NodeType::RegularFile, reference))
     }
 
-    fn link(&self, _name: &str, _node: &DirEntry) -> VfsResult<DirEntry> {
-        Err(VfsError::OperationNotSupported)
+    fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
+        let in_args = FuseLinkIn {
+            oldnodeid: node.inode(),
+        };
+        let mut in_data = unsafe { 
+            core::slice::from_raw_parts(
+                &in_args as *const _ as *const u8,
+                core::mem::size_of::<FuseLinkIn>()
+            )
+        }.to_vec();
+        in_data.extend_from_slice(name.as_bytes());
+        in_data.push(0);
+
+        let out_data = self.fs.send_request(FuseOpcode::Link, self.nodeid, in_data)?;
+        if out_data.len() < core::mem::size_of::<FuseEntryOut>() {
+            return Err(VfsError::Io);
+        }
+
+        let entry_out = unsafe { &*(out_data.as_ptr() as *const FuseEntryOut) };
+        let is_dir = (entry_out.attr.mode & 0o170000) == 0o040000;
+        
+        let new_node = Arc::new(FuseNode {
+            fs: self.fs.clone(),
+            nodeid: entry_out.nodeid,
+            is_dir,
+        });
+
+        let node_type = if is_dir { NodeType::Directory } else { NodeType::RegularFile };
+        let reference = Reference::new(None, String::from(name));
+
+        let dir_entry = if is_dir {
+            DirEntry::new_dir(move |_| DirNode::new(new_node), reference)
+        } else {
+            DirEntry::new_file(FileNode::new(new_node), node_type, reference)
+        };
+        Ok(dir_entry)
     }
 
     fn unlink(&self, name: &str) -> VfsResult<()> {
@@ -428,7 +465,22 @@ impl DirNodeOps for FuseNode {
         Ok(())
     }
 
-    fn rename(&self, _old_name: &str, _target: &DirNode, _new_name: &str) -> VfsResult<()> {
-        Err(VfsError::OperationNotSupported)
+    fn rename(&self, old_name: &str, target: &DirNode, new_name: &str) -> VfsResult<()> {
+        let in_args = FuseRenameIn {
+            newdir: target.inode(),
+        };
+        let mut in_data = unsafe { 
+            core::slice::from_raw_parts(
+                &in_args as *const _ as *const u8,
+                core::mem::size_of::<FuseRenameIn>()
+            )
+        }.to_vec();
+        in_data.extend_from_slice(old_name.as_bytes());
+        in_data.push(0);
+        in_data.extend_from_slice(new_name.as_bytes());
+        in_data.push(0);
+
+        self.fs.send_request(FuseOpcode::Rename, self.nodeid, in_data)?;
+        Ok(())
     }
 }

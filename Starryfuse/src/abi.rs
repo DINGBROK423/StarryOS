@@ -204,3 +204,15 @@ pub struct FuseDirent {
     pub type_: u32,
     // name follows
 }
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct FuseRenameIn {
+    pub newdir: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct FuseLinkIn {
+    pub oldnodeid: u64,
+}
