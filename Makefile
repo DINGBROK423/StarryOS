@@ -18,7 +18,7 @@ export AX_LIB := axfeat
 export APP_FEATURES := qemu
 
 ifeq ($(ARCH), x86_64)
-  KMOD_RUSTFLAGS :=  -C code-model=small
+  KMOD_RUSTFLAGS :=  -C code-model=small -Z share-generics=no
 else ifeq ($(ARCH), loongarch64)
   KMOD_RUSTFLAGS :=  -C code-model=large
 endif

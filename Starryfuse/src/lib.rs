@@ -13,12 +13,12 @@ use dev::{FuseConnection, FuseDev};
 use spin::Once;
 use starry_api::vfs::{register_devfs_device, unregister_devfs_device};
 
-pub static FUSE_CONNECTION: Once<Arc<SpinNoIrq<FuseConnection>>> = Once::new();
+pub static FUSE_CONNECTION: Once<Arc<FuseConnection>> = Once::new();
 
 // Entry point to initialize Starryfuse
 pub fn init_fuse() -> i32 {
     let conn = FUSE_CONNECTION.get().cloned().unwrap_or_else(|| {
-        let conn = Arc::new(SpinNoIrq::new(FuseConnection::new()));
+        let conn = Arc::new(FuseConnection::new());
         FUSE_CONNECTION.call_once(|| conn.clone());
         conn
     });
@@ -55,10 +55,9 @@ pub fn init_fuse() -> i32 {
 pub fn exit_fuse() {
     starry_api::vfs::unregister_filesystem("fuse");
     if let Some(conn) = FUSE_CONNECTION.get() {
-        let mut conn_lock = conn.lock();
-        conn_lock.aborted = true;
-        conn_lock.wait_queue.wake(usize::MAX, 1);
-        conn_lock.poll_set.wake();
+        conn.state.lock().aborted = true;
+        conn.wait_queue.wake(usize::MAX, 1);
+        conn.poll_set.wake();
     }
     match unregister_devfs_device("fuse") {
         Ok(()) => {

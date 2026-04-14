@@ -52,6 +52,22 @@ impl UsageChecker for ProcfsUsageChecker {
     }
 
     fn prepare_unload(&self) -> Result<(), ()> {
+        let mut process_data_list = alloc::vec::Vec::new();
+        for task in tasks() {
+            process_data_list.push(task.as_thread().proc_data.clone());
+        }
+
+        for proc_data in process_data_list {
+            let scope_guard = proc_data.scope.read();
+            let fs_scope = FS_CONTEXT.scope(&scope_guard);
+            let fs = fs_scope.lock();
+            if let Ok(loc) = fs.resolve("/proc") {
+                if loc.is_root_of_mount() {
+                    let _ = loc.unmount();
+                }
+            }
+        }
+
         let fs = FS_CONTEXT.lock();
         if let Ok(loc) = fs.resolve("/proc") {
             if loc.is_root_of_mount() {
@@ -116,8 +132,22 @@ impl UsageChecker for FuseUsageChecker {
     }
 
     fn prepare_unload(&self) -> Result<(), ()> {
-        // Best-effort unmount for the conventional FUSE mount point.
-        // A truly dynamic solution would require iterating all mount points.
+        let mut process_data_list = alloc::vec::Vec::new();
+        for task in tasks() {
+            process_data_list.push(task.as_thread().proc_data.clone());
+        }
+
+        for proc_data in process_data_list {
+            let scope_guard = proc_data.scope.read();
+            let fs_scope = FS_CONTEXT.scope(&scope_guard);
+            let fs = fs_scope.lock();
+            if let Ok(loc) = fs.resolve("/mnt/fuse") {
+                if loc.is_root_of_mount() {
+                    let _ = loc.unmount();
+                }
+            }
+        }
+
         let fs = FS_CONTEXT.lock();
         if let Ok(loc) = fs.resolve("/mnt/fuse") {
             if loc.is_root_of_mount() {

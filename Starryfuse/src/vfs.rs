@@ -19,7 +19,7 @@ use crate::abi::*;
 use crate::dev::{FuseConnection, FuseRequest};
 
 pub struct FuseFs {
-    conn: Arc<SpinNoIrq<FuseConnection>>,
+    conn: Arc<FuseConnection>,
     pub max_write: u32,
     pub flags: u32,
     root: Mutex<Option<DirEntry>>,
@@ -46,7 +46,7 @@ impl FilesystemOps for FuseFs {
 }
 
 impl FuseFs {
-    pub fn new(conn: Arc<SpinNoIrq<FuseConnection>>) -> Arc<Self> {
+    pub fn new(conn: Arc<FuseConnection>) -> Arc<Self> {
         let fs = Arc::new(Self { 
             conn,
             max_write: 4096, // default
@@ -105,7 +105,7 @@ impl FuseFs {
     }
 
     fn send_request(&self, opcode: FuseOpcode, nodeid: u64, in_data: Vec<u8>) -> VfsResult<Vec<u8>> {
-        let unique = self.conn.lock().next_unique();
+        let unique = self.conn.next_unique();
         let header = FuseInHeader {
             len: (core::mem::size_of::<FuseInHeader>() + in_data.len()) as u32,
             opcode: opcode as u32,
@@ -126,10 +126,10 @@ impl FuseFs {
         }));
 
         {
-            let mut conn = self.conn.lock();
-            conn.pending.push(req.clone());
-            conn.wait_queue.wake(1, 1);
-            conn.poll_set.wake();
+            let mut state = self.conn.state.lock();
+            state.pending.push(req.clone());
+            self.conn.wait_queue.wake(1, 1);
+            self.conn.poll_set.wake();
         }
 
         let mut retries = 0u32;
@@ -141,9 +141,9 @@ impl FuseFs {
             if retries > 50_000 {
                 // Timed out: userspace daemon never responded.
                 // Clean up to avoid dangling references.
-                let mut conn = self.conn.lock();
-                conn.pending.retain(|r| !Arc::ptr_eq(r, &req));
-                conn.processing.remove(&unique);
+                let mut state = self.conn.state.lock();
+                state.pending.retain(|r| !Arc::ptr_eq(r, &req));
+                state.processing.remove(&unique);
                 axlog::warn!("FUSE: send_request timed out for opcode {:?}", opcode as u32);
                 return Err(VfsError::Io);
             }

@@ -9,7 +9,7 @@ use kmod::{exit_fn, init_fn, module};
 #[init_fn]
 pub fn fuse_init() -> i32 {
     let conn = starryfuse::FUSE_CONNECTION.get().cloned().unwrap_or_else(|| {
-        let conn = Arc::new(kspin::SpinNoIrq::new(starryfuse::dev::FuseConnection::new()));
+        let conn = Arc::new(starryfuse::dev::FuseConnection::new());
         starryfuse::FUSE_CONNECTION.call_once(|| conn.clone());
         conn
     });

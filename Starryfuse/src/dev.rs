@@ -21,30 +21,34 @@ pub struct FuseRequest {
     pub completed: bool,
 }
 
-pub struct FuseConnection {
-    // Requests waiting to be read by userspace FUSE daemon
+pub struct FuseConnectionState {
     pub pending: Vec<Arc<SpinNoIrq<FuseRequest>>>,
-    // Requests that have been read and are waiting for userspace response
     pub processing: BTreeMap<u64, Arc<SpinNoIrq<FuseRequest>>>,
+    pub aborted: bool,
+}
+
+pub struct FuseConnection {
+    // Shared state protected by SpinNoIrq lock
+    pub state: SpinNoIrq<FuseConnectionState>,
     // Unique ID counter
     unique_counter: AtomicU64,
     // Poll set for async wakeups
     pub poll_set: PollSet,
     // Wait queue for blocking reads
     pub wait_queue: WaitQueue,
-    // Abort flag to wake up and exit
-    pub aborted: bool,
 }
 
 impl FuseConnection {
     pub fn new() -> Self {
         Self {
-            pending: Vec::new(),
-            processing: BTreeMap::new(),
+            state: SpinNoIrq::new(FuseConnectionState {
+                pending: Vec::new(),
+                processing: BTreeMap::new(),
+                aborted: false,
+            }),
             unique_counter: AtomicU64::new(1),
             poll_set: PollSet::new(),
             wait_queue: WaitQueue::new(),
-            aborted: false,
         }
     }
 
@@ -54,20 +58,21 @@ impl FuseConnection {
 }
 
 pub struct FuseDev {
-    pub conn: Arc<SpinNoIrq<FuseConnection>>,
+    pub conn: Arc<FuseConnection>,
 }
 
 impl DeviceOps for FuseDev {
     fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         loop {
-            let mut conn = self.conn.lock();
+            // First step: quickly grab the lock, check state, and drop it.
+            let mut state = self.conn.state.lock();
             
-            if conn.aborted {
+            if state.aborted {
                 return Ok(0); // Return EOF when connection is aborted
             }
             
-            if !conn.pending.is_empty() {
-                let req_arc = conn.pending.remove(0);
+            if !state.pending.is_empty() {
+                let req_arc = state.pending.remove(0);
                 let req = req_arc.lock();
                 
                 let header_bytes = unsafe {
@@ -87,18 +92,19 @@ impl DeviceOps for FuseDev {
                 buf[header_bytes.len()..total_len].copy_from_slice(&req.in_data);
 
                 // Move to processing
-                conn.processing.insert(req.header.unique, req_arc.clone());
+                state.processing.insert(req.header.unique, req_arc.clone());
 
                 return Ok(total_len);
             }
             
-            // Wait for new requests or abort
-            let wait_queue = &conn.wait_queue as *const WaitQueue;
-            drop(conn);
+            // Drop lock before going to sleep to allow other cores to modify state
+            drop(state);
             
-            unsafe { &*wait_queue }.wait_if(1, None, || {
-                let conn = self.conn.lock();
-                conn.pending.is_empty() && !conn.aborted
+            // Now sleep safely using the WaitQueue that is NOT under the spinlock 
+            // and NOT a raw pointer. `self.conn` is protected by `Arc` so it stays alive.
+            self.conn.wait_queue.wait_if(1, None, || {
+                let state = self.conn.state.lock();
+                state.pending.is_empty() && !state.aborted
             }).map_err(|_| VfsError::Interrupted)?;
         }
     }
@@ -111,8 +117,8 @@ impl DeviceOps for FuseDev {
         let out_header = unsafe { &*(buf.as_ptr() as *const FuseOutHeader) };
         let out_data = &buf[core::mem::size_of::<FuseOutHeader>()..];
 
-        let mut conn = self.conn.lock();
-        if let Some(req_arc) = conn.processing.remove(&out_header.unique) {
+        let mut state = self.conn.state.lock();
+        if let Some(req_arc) = state.processing.remove(&out_header.unique) {
             let mut req = req_arc.lock();
             req.out_header = Some(*out_header);
             req.out_data = out_data.to_vec();
@@ -142,11 +148,11 @@ impl DeviceOps for FuseDev {
 impl Pollable for FuseDev {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
-        let conn = self.conn.lock();
+        let state = self.conn.state.lock();
         
-        if conn.aborted {
+        if state.aborted {
             events |= IoEvents::IN | IoEvents::ERR | IoEvents::HUP;
-        } else if !conn.pending.is_empty() {
+        } else if !state.pending.is_empty() {
             events |= IoEvents::IN;
         }
         
@@ -157,10 +163,8 @@ impl Pollable for FuseDev {
     }
 
     fn register(&self, context: &mut Context<'_>, _events: IoEvents) {
-        let conn = self.conn.lock();
-        // Since both IN and OUT share the same waker list here, 
-        // we can just register the waker to the poll_set.
-        // It will be awakened when a new request is pending.
-        conn.poll_set.register(context.waker());
+        // No lock needed to register to a concurrent PollSet!
+        // We can just register the waker directly.
+        self.conn.poll_set.register(context.waker());
     }
 }
