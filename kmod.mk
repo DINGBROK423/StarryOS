@@ -28,7 +28,7 @@ export KMOD_LINKER_SCRIPT
 
 
 # Get list of modules (directories in MODULE_PATHS)
-MODULES := $(shell if [ -d $(MODULE_PATHS) ]; then ls -d $(MODULE_PATHS)/*/ 2>/dev/null | xargs -I {} basename {}; fi)
+MODULES := $(shell if [ -d $(MODULE_PATHS) ]; then ls -d $(MODULE_PATHS)/*/ 2>/dev/null | xargs -I {} basename {} | grep -v '^procfs$$'; fi)
 
 
 .PHONY: all clean modules $(MODULES) list-modules help

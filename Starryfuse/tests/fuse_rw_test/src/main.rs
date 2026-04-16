@@ -261,7 +261,7 @@ fn main() {
                 Err(e) => println!("[TEST] initial read: FAIL ({})", e),
             }
 
-            match File::options().write(true).open("/mnt/fuse/rw_test.txt") {
+            match File::options().write(true).truncate(true).open("/mnt/fuse/rw_test.txt") {
                 Ok(mut f) => match f.write_all(NEWFILE_CONTENT) {
                     Ok(()) => println!("[TEST] write existing: PASS"),
                     Err(e) => println!("[TEST] write existing: FAIL ({})", e),
@@ -286,7 +286,7 @@ fn main() {
                 Err(e) => println!("[TEST] mkdir: FAIL ({})", e),
             }
 
-            match File::options().write(true).create(true).open("/mnt/fuse/newfile.txt") {
+            match File::options().write(true).create(true).truncate(true).open("/mnt/fuse/newfile.txt") {
                 Ok(mut f) => match f.write_all(NEWFILE_CONTENT) {
                     Ok(()) => println!("[TEST] create+write: PASS"),
                     Err(e) => println!("[TEST] create+write: FAIL ({})", e),
@@ -474,6 +474,8 @@ fn main() {
             let name = std::str::from_utf8(&buf[size_of::<FuseInHeader>() + size_of::<FuseCreateIn>()..n])
                 .unwrap_or("").trim_matches('\0');
             handle_create(&mut fuse_dev, header.unique, name, &state);
+        } else if header.opcode == 4 { // FuseOpcode::Setattr
+            handle_setattr(&mut fuse_dev, header.unique, header.nodeid, &state);
         } else {
             // Send ENOSYS for unimplemented opcodes
             send_error(&mut fuse_dev, header.unique, 38); // ENOSYS
@@ -659,6 +661,29 @@ fn handle_mkdir(dev: &mut File, unique: u64, _name: &str, _state: &Arc<Mutex<FsS
     };
     send_response(dev, unique, &reply);
     println!("Sent MKDIR response");
+}
+
+fn handle_setattr(dev: &mut File, unique: u64, nodeid: u64, state: &Arc<Mutex<FsState>>) {
+    let mut st = state.lock().unwrap();
+    if let Some(content) = st.files.get_mut(&nodeid) {
+        content.clear();
+    }
+    let size = st.files.get(&nodeid).map(|c| c.len() as u64).unwrap_or(0);
+    drop(st);
+    let attr = FuseAttr {
+        ino: nodeid,
+        size,
+        mode: 0o100644,
+        nlink: 1,
+        ..Default::default()
+    };
+    let reply = FuseAttrOut {
+        attr_valid: 1,
+        attr,
+        ..Default::default()
+    };
+    send_response(dev, unique, &reply);
+    println!("Sent SETATTR response for nodeid={}", nodeid);
 }
 
 fn handle_create(dev: &mut File, unique: u64, name: &str, state: &Arc<Mutex<FsState>>) {

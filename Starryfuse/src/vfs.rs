@@ -129,7 +129,9 @@ impl FuseFs {
             let mut state = self.conn.state.lock();
             state.pending.push(req.clone());
             self.conn.wait_queue.wake(1, 1);
+
             self.conn.poll_set.wake();
+
         }
 
         let mut retries = 0u32;
@@ -204,16 +206,10 @@ impl NodeOps for FuseNode {
     }
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
-        // The current userspace test daemon does not implement FUSE_SETATTR yet.
-        // Accept timestamp updates as best-effort no-op to avoid noisy warnings
-        // on file drop, but keep unsupported semantics for chmod/chown requests.
-        if update.mode.is_some() || update.owner.is_some() {
-            return Err(VfsError::OperationNotSupported);
-        }
-
-        if update.atime.is_some() || update.mtime.is_some() {
-            return Ok(());
-        }
+        // The userspace test daemon does not implement FUSE_SETATTR.
+        // We must accept all updates as no-ops, because axfs-ng-vfs calls
+        // update_metadata(owner=Some) unconditionally after create_locked,
+        // and returning OperationNotSupported breaks open(O_CREAT).
 
         Ok(())
     }
@@ -228,6 +224,10 @@ impl NodeOps for FuseNode {
 
     fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
+    }
+
+    fn flags(&self) -> axfs_ng_vfs::NodeFlags {
+        axfs_ng_vfs::NodeFlags::NON_CACHEABLE
     }
 }
 
@@ -291,7 +291,21 @@ impl FileNodeOps for FuseNode {
     fn append(&self, _buf: &[u8]) -> VfsResult<(usize, u64)> {
         Err(VfsError::OperationNotSupported)
     }
-    fn set_len(&self, _len: u64) -> VfsResult<()> { Ok(()) }
+    fn set_len(&self, len: u64) -> VfsResult<()> {
+        let in_args = FuseSetattrIn {
+            valid: FATTR_SIZE,
+            size: len,
+            ..Default::default()
+        };
+        let in_data = unsafe {
+            core::slice::from_raw_parts(
+                &in_args as *const _ as *const u8,
+                core::mem::size_of::<FuseSetattrIn>()
+            )
+        }.to_vec();
+        self.fs.send_request(FuseOpcode::Setattr, self.nodeid, in_data)?;
+        Ok(())
+    }
     fn set_symlink(&self, target: &str) -> VfsResult<()> {
         let mut in_data = target.as_bytes().to_vec();
         in_data.push(0);
@@ -385,39 +399,69 @@ impl DirNodeOps for FuseNode {
         false
     }
     fn create(&self, name: &str, ty: NodeType, perm: NodePermission) -> VfsResult<DirEntry> {
-        if ty != NodeType::RegularFile {
-            return Err(VfsError::OperationNotSupported);
+        match ty {
+            NodeType::RegularFile => {
+                let in_args = FuseCreateIn {
+                    flags: 0o100 | 0o2 | 0o1000, // O_CREAT | O_RDWR | O_TRUNC (approx)
+                    mode: (perm.bits() as u32) | 0o100000,
+                    umask: 0,
+                    padding: 0,
+                };
+                let mut in_data = unsafe {
+                    core::slice::from_raw_parts(
+                        &in_args as *const _ as *const u8,
+                        core::mem::size_of::<FuseCreateIn>()
+                    )
+                }.to_vec();
+                in_data.extend_from_slice(name.as_bytes());
+                in_data.push(0);
+
+                let out_data = self.fs.send_request(FuseOpcode::Create, self.nodeid, in_data)?;
+                if out_data.len() < core::mem::size_of::<FuseEntryOut>() + core::mem::size_of::<FuseOpenOut>() {
+                    return Err(VfsError::Io);
+                }
+
+                let entry_out = unsafe { &*(out_data.as_ptr() as *const FuseEntryOut) };
+                let new_node = Arc::new(FuseNode {
+                    fs: self.fs.clone(),
+                    nodeid: entry_out.nodeid,
+                    is_dir: false,
+                });
+
+                let reference = Reference::new(None, String::from(name));
+                Ok(DirEntry::new_file(FileNode::new(new_node), NodeType::RegularFile, reference))
+            }
+            NodeType::Directory => {
+                let in_args = FuseMkdirIn {
+                    mode: (perm.bits() as u32) | 0o040000,
+                    umask: 0,
+                };
+                let mut in_data = unsafe {
+                    core::slice::from_raw_parts(
+                        &in_args as *const _ as *const u8,
+                        core::mem::size_of::<FuseMkdirIn>()
+                    )
+                }.to_vec();
+                in_data.extend_from_slice(name.as_bytes());
+                in_data.push(0);
+
+                let out_data = self.fs.send_request(FuseOpcode::Mkdir, self.nodeid, in_data)?;
+                if out_data.len() < core::mem::size_of::<FuseEntryOut>() {
+                    return Err(VfsError::Io);
+                }
+
+                let entry_out = unsafe { &*(out_data.as_ptr() as *const FuseEntryOut) };
+                let new_node = Arc::new(FuseNode {
+                    fs: self.fs.clone(),
+                    nodeid: entry_out.nodeid,
+                    is_dir: true,
+                });
+
+                let reference = Reference::new(None, String::from(name));
+                Ok(DirEntry::new_dir(move |_| DirNode::new(new_node), reference))
+            }
+            _ => Err(VfsError::OperationNotSupported),
         }
-
-        let in_args = FuseCreateIn {
-            flags: 0o100 | 0o2 | 0o1000, // O_CREAT | O_RDWR | O_TRUNC (approx)
-            mode: (perm.bits() as u32) | 0o100000,
-            umask: 0,
-            padding: 0,
-        };
-        let mut in_data = unsafe { 
-            core::slice::from_raw_parts(
-                &in_args as *const _ as *const u8,
-                core::mem::size_of::<FuseCreateIn>()
-            )
-        }.to_vec();
-        in_data.extend_from_slice(name.as_bytes());
-        in_data.push(0);
-
-        let out_data = self.fs.send_request(FuseOpcode::Create, self.nodeid, in_data)?;
-        if out_data.len() < core::mem::size_of::<FuseEntryOut>() + core::mem::size_of::<FuseOpenOut>() {
-            return Err(VfsError::Io);
-        }
-
-        let entry_out = unsafe { &*(out_data.as_ptr() as *const FuseEntryOut) };
-        let new_node = Arc::new(FuseNode {
-            fs: self.fs.clone(),
-            nodeid: entry_out.nodeid,
-            is_dir: false,
-        });
-
-        let reference = Reference::new(None, String::from(name));
-        Ok(DirEntry::new_file(FileNode::new(new_node), NodeType::RegularFile, reference))
     }
 
     fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {

@@ -14,7 +14,8 @@ use axfs_ng_vfs::{
     Filesystem, NodePermission,
     path::{Path, PathBuf},
 };
-pub use proc::{KALLSYMS, new_procfs};
+pub use proc::KALLSYMS;
+// pub use proc::new_procfs; // [ondemand-procfs] commented out: procfs is statically mounted again
 pub use dev::{register_devfs_device, unregister_devfs_device};
 pub use starry_core::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 pub use tmp::MemoryFs;
@@ -98,12 +99,14 @@ pub fn mount_all() -> LinuxResult<()> {
         "find addr of _stext: {:#x}",
         ksym.lookup_name("_start").unwrap_or(0)
     );
-    proc::init_kallsyms(ksym);
+    // [ondemand-procfs] commented out: init_kallsyms is no longer needed for static procfs
+    // proc::init_kallsyms(ksym);
 
     let fs = FS_CONTEXT.lock();
     mount_at(&fs, "/dev", dev::new_devfs())?;
     mount_at(&fs, "/dev/shm", tmp::MemoryFs::new())?;
     mount_at(&fs, "/tmp", tmp::MemoryFs::new())?;
+    mount_at(&fs, "/proc", proc::new_procfs(ksym))?;
 
     mount_at(&fs, "/sys", tmp::MemoryFs::new())?;
     let mut path = PathBuf::new();

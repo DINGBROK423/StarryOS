@@ -2174,18 +2174,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "procfs"
-version = "0.1.0"
-dependencies = [
- "axfeat",
- "axfs-ng",
- "axfs-ng-vfs",
- "axlog",
- "kmod",
- "starry-api",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"

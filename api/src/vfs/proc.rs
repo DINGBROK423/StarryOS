@@ -88,11 +88,13 @@ const DUMMY_MEMINFO: &str = indoc! {"
 
 pub static KALLSYMS: LazyInit<KallsymsMapped<'static>> = LazyInit::new();
 
-pub fn init_kallsyms(kallsyms: KallsymsMapped<'static>) {
-    KALLSYMS.init_once(kallsyms);
-}
+// [ondemand-procfs] commented out: kallsyms is now passed directly to new_procfs for static mounting
+// pub fn init_kallsyms(kallsyms: KallsymsMapped<'static>) {
+//     KALLSYMS.init_once(kallsyms);
+// }
 
-pub fn new_procfs() -> Filesystem {
+pub fn new_procfs(kallsyms: KallsymsMapped<'static>) -> Filesystem {
+    KALLSYMS.init_once(kallsyms);
     SimpleFs::new_with("proc".into(), 0x9fa0, builder)
 }
 
@@ -460,6 +462,26 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     root.add(
         "interrupts",
         SimpleFile::new_regular(fs.clone(), || Ok(format!("0: {}", crate::time::irq_cnt()))),
+    );
+
+    root.add(
+        "ondemand_meminfo",
+        SimpleFile::new_regular(fs.clone(), || {
+            use core::sync::atomic::Ordering;
+            let m = &crate::kmod::ondemand::ONDEMAND_MEM;
+            let out = format!(
+                "fuse_before_load {}\nfuse_after_load {}\nfuse_before_unload {}\nfuse_after_unload {}\npages_before_load {}\npages_after_load {}\npages_before_unload {}\npages_after_unload {}\n",
+                m.fuse_before_load.load(Ordering::Relaxed),
+                m.fuse_after_load.load(Ordering::Relaxed),
+                m.fuse_before_unload.load(Ordering::Relaxed),
+                m.fuse_after_unload.load(Ordering::Relaxed),
+                m.pages_before_load.load(Ordering::Relaxed),
+                m.pages_after_load.load(Ordering::Relaxed),
+                m.pages_before_unload.load(Ordering::Relaxed),
+                m.pages_after_unload.load(Ordering::Relaxed),
+            );
+            Ok(out)
+        }),
     );
 
     root.add("sys", {

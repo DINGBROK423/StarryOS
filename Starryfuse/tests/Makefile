@@ -15,10 +15,13 @@ DISK_PATH ?= $(abspath ../../disk)
 
 all:
 	cd fuse_test && cargo build --release --target=$(TARGET) -Zbuild-std
+	cd fuse_mem_test && cargo build --release --target=$(TARGET) -Zbuild-std
 
 install: all
 	mkdir -p $(DISK_PATH)/musl
 	cp fuse_test/target/$(TARGET)/release/fuse_test $(DISK_PATH)/musl/
+	cp fuse_mem_test/target/$(TARGET)/release/fuse_mem_test $(DISK_PATH)/musl/
 
 clean:
 	cd fuse_test && cargo clean
+	cd fuse_mem_test && cargo clean

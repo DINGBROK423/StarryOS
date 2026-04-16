@@ -3,6 +3,7 @@
 //! Bridges the `ondemand-kmod` framework with StarryOS's existing LKM
 //! infrastructure (`kmod::init_module` / `kmod::delete_module`).
 
+use alloc::format;
 use alloc::vec::Vec;
 
 use axfs_ng::{FS_CONTEXT, OpenOptions};
@@ -18,9 +19,65 @@ use spin::Once;
 /// Bridges `ondemand-kmod::ModuleLoader` with StarryOS's kmod subsystem.
 pub struct KmodOnDemandLoader;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Pre-recorded snapshots around fuse load/unload.
+/// We track both RustHeap (global alloc) and used_pages (page allocator)
+/// because module code pages are allocated via vmalloc/dealloc_frames,
+/// which do not affect RustHeap stats.
+pub struct OndemandMemInfo {
+    pub fuse_before_load: AtomicU64,
+    pub fuse_after_load: AtomicU64,
+    pub fuse_before_unload: AtomicU64,
+    pub fuse_after_unload: AtomicU64,
+    pub pages_before_load: AtomicU64,
+    pub pages_after_load: AtomicU64,
+    pub pages_before_unload: AtomicU64,
+    pub pages_after_unload: AtomicU64,
+}
+
+pub static ONDEMAND_MEM: OndemandMemInfo = OndemandMemInfo {
+    fuse_before_load: AtomicU64::new(0),
+    fuse_after_load: AtomicU64::new(0),
+    fuse_before_unload: AtomicU64::new(0),
+    fuse_after_unload: AtomicU64::new(0),
+    pages_before_load: AtomicU64::new(0),
+    pages_after_load: AtomicU64::new(0),
+    pages_before_unload: AtomicU64::new(0),
+    pages_after_unload: AtomicU64::new(0),
+};
+
+fn log_heap(tag: &str) {
+    let stats = axalloc::global_allocator().usage_stats();
+    let heap = stats.get(axalloc::UsageKind::RustHeap) as u64;
+    let cache = stats.get(axalloc::UsageKind::PageCache) as u64;
+    let pages = axalloc::global_allocator().used_pages() as u64;
+    axlog::warn!("[memtest] {} RustHeap={} PageCache={} Pages={}", tag, heap, cache, pages);
+    match tag {
+        "before_load_fuse" => {
+            ONDEMAND_MEM.fuse_before_load.store(heap, Ordering::SeqCst);
+            ONDEMAND_MEM.pages_before_load.store(pages, Ordering::SeqCst);
+        }
+        "after_load_fuse" => {
+            ONDEMAND_MEM.fuse_after_load.store(heap, Ordering::SeqCst);
+            ONDEMAND_MEM.pages_after_load.store(pages, Ordering::SeqCst);
+        }
+        "before_unload_fuse" => {
+            ONDEMAND_MEM.fuse_before_unload.store(heap, Ordering::SeqCst);
+            ONDEMAND_MEM.pages_before_unload.store(pages, Ordering::SeqCst);
+        }
+        "after_unload_fuse" => {
+            ONDEMAND_MEM.fuse_after_unload.store(heap, Ordering::SeqCst);
+            ONDEMAND_MEM.pages_after_unload.store(pages, Ordering::SeqCst);
+        }
+        _ => {}
+    }
+}
+
 impl ModuleLoader for KmodOnDemandLoader {
     fn load(&self, name: &str, ko_path: &str) -> Result<u64, LoadError> {
         axlog::warn!("[ondemand] loading module '{}' from '{}'", name, ko_path);
+        log_heap(&format!("before_load_{}", name));
 
         // Read .ko file from the filesystem.
         let elf_data = read_ko_file(ko_path).map_err(|e| {
@@ -40,9 +97,10 @@ impl ModuleLoader for KmodOnDemandLoader {
 
         // Use the name's hash as an opaque handle (we look up by name anyway).
         let handle = simple_hash(name);
+        log_heap(&format!("after_load_{}", name));
         axlog::warn!("[ondemand] module '{}' loaded, handle={:#x}", name, handle);
         Ok(handle)
-    }
+   }
 
     fn unload(&self, handle: u64) -> Result<(), UnloadError> {
         // We stored the name's hash as handle; for unload we need the name.
@@ -60,11 +118,14 @@ impl ModuleLoader for KmodOnDemandLoader {
             Some(name) => {
                 let name = name.clone();
                 drop(modules);
+                log_heap(&format!("before_unload_{}", name));
 
-                super::delete_module(&name).map_err(|e| {
+                let r = super::delete_module(&name).map_err(|e| {
                     axlog::error!("[ondemand] delete_module('{}') failed: {:?}", name, e);
                     UnloadError::Other
-                })
+                });
+                log_heap(&format!("after_unload_{}", name));
+                r
             }
             None => {
                 axlog::error!("[ondemand] no module with handle={:#x}", handle);

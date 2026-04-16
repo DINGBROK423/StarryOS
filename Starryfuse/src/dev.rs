@@ -136,7 +136,7 @@ impl DeviceOps for FuseDev {
     }
 
     fn as_pollable(&self) -> Option<&dyn Pollable> {
-        Some(self)
+        Some(self)   
     }
 
     fn flags(&self) -> NodeFlags {
@@ -159,12 +159,14 @@ impl Pollable for FuseDev {
         // FUSE user daemon can always theoretically write a response.
         events |= IoEvents::OUT;
         
+
         events
     }
 
     fn register(&self, context: &mut Context<'_>, _events: IoEvents) {
         // No lock needed to register to a concurrent PollSet!
         // We can just register the waker directly.
+
         self.conn.poll_set.register(context.waker());
     }
 }

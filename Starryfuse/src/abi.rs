@@ -36,7 +36,8 @@ pub enum FuseOpcode {
     Readdir = 28,
     Releasedir = 29,
     Fsyncdir = 30,
-    Create = 34,
+    Access = 34,
+    Create = 35,
     Destroy = 38,
     // Add more as needed
 }
@@ -177,6 +178,29 @@ pub struct FuseWriteOut {
 #[derive(Debug, Default, Copy, Clone)]
 pub struct FuseReadOut {
     // followed by actual data
+}
+
+pub const FATTR_SIZE: u32 = 0x00000004;
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct FuseSetattrIn {
+    pub valid: u32,
+    pub padding: u32,
+    pub fh: u64,
+    pub size: u64,
+    pub lock_owner: u64,
+    pub atime: u64,
+    pub mtime: u64,
+    pub ctime: u64,
+    pub atimensec: u32,
+    pub mtimensec: u32,
+    pub ctimensec: u32,
+    pub mode: u32,
+    pub unused4: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub unused5: u32,
 }
 
 #[repr(C)]
